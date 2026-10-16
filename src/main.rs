@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use brew_changes::github::{Client, resolve_source};
 use brew_changes::homebrew::{self, brew_info_runner};
-use brew_changes::ui::app::{Item, Outcome};
+use brew_changes::ui::app::{Item, Outcome, Upgrade};
 use brew_changes::ui::keys::Keymap;
 use brew_changes::ui::run::{detect_dark_background, run};
 
@@ -55,7 +55,7 @@ async fn run_app() -> Result<()> {
     }
     let (casks, formulae): (Vec<Item>, Vec<Item>) = items
         .into_iter()
-        .filter(|item| !item.upgraded)
+        .filter(|item| item.upgrade != Upgrade::Done)
         .partition(|item| item.is_cask);
     if formulae.is_empty() && casks.is_empty() {
         println!("Everything is already upgraded.");

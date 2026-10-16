@@ -5,7 +5,7 @@ use serde::Deserialize;
 use super::source::parse_github_file_url;
 use super::{Client, Release, Source};
 use crate::changelog::trim_to_range;
-use crate::version::matches_tag;
+use crate::version::{matches_tag, shorten};
 
 const BASE_NAMES: [&str; 4] = ["CHANGELOG", "CHANGES", "HISTORY", "NEWS"];
 const EXTENSIONS: [&str; 3] = [".md", ".rst", ""];
@@ -44,15 +44,23 @@ impl std::fmt::Display for HtmlWithoutVersion {
 
 impl std::error::Error for HtmlWithoutVersion {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stage {
+    /// Set by the UI when a fetch starts; `fetch` reports only the later ones.
+    Changelog,
+    File(String),
+    Releases,
+}
+
 impl Client {
-    /// `on_stage` is called before each network stage after the first, with
-    /// the changelog filename or "releases", so the UI can show progress.
+    /// `on_stage` is called before each network stage after the first, so the
+    /// UI can show progress.
     pub async fn fetch(
         &self,
         source: &Source,
         installed: &str,
         current: &str,
-        mut on_stage: impl FnMut(&str),
+        mut on_stage: impl FnMut(Stage),
     ) -> Changelog {
         let (installed, current) = if source.version_parts > 0 {
             (
@@ -98,7 +106,7 @@ impl Client {
             .resolve_changelog_filename(&source.owner, &source.repo)
             .await
         {
-            on_stage(&filename);
+            on_stage(Stage::File(filename.clone()));
             if let Ok(content) = self
                 .fetch_github_file(&source.owner, &source.repo, &filename, None)
                 .await
@@ -116,7 +124,7 @@ impl Client {
             changelog.filename = Some(filename);
         }
 
-        on_stage("releases");
+        on_stage(Stage::Releases);
         match self
             .fetch_releases(
                 &source.owner,
@@ -227,10 +235,6 @@ impl Client {
             .next()
             .map(|commit| commit.commit.committer.date)
     }
-}
-
-fn shorten(version: &str, parts: usize) -> String {
-    version.split('.').take(parts).collect::<Vec<_>>().join(".")
 }
 
 #[cfg(test)]
@@ -489,14 +493,12 @@ mod tests {
         let (_server, client) = fetch_server("2.0.0", json!([])).await;
         let mut stages = vec![];
         let got = client
-            .fetch(&repo(), "1.0.0", "2.0.0", |stage| {
-                stages.push(stage.to_string())
-            })
+            .fetch(&repo(), "1.0.0", "2.0.0", |stage| stages.push(stage))
             .await;
         assert_eq!(got.origin, Origin::File);
         assert!(got.found);
         assert_eq!(got.section, "## 2.0.0\nnotes\n");
-        assert_eq!(stages, ["CHANGELOG.md"]);
+        assert_eq!(stages, [Stage::File("CHANGELOG.md".into())]);
     }
 
     #[tokio::test]
@@ -519,15 +521,16 @@ mod tests {
         .await;
         let mut stages = vec![];
         let got = client
-            .fetch(&repo(), "1.0.0", "2.0.0", |stage| {
-                stages.push(stage.to_string())
-            })
+            .fetch(&repo(), "1.0.0", "2.0.0", |stage| stages.push(stage))
             .await;
         assert_eq!(got.origin, Origin::Releases);
         assert!(got.found);
         assert_eq!(got.filename.as_deref(), Some("CHANGELOG.md"));
         assert_eq!(got.releases.len(), 1);
-        assert_eq!(stages, ["CHANGELOG.md", "releases"]);
+        assert_eq!(
+            stages,
+            [Stage::File("CHANGELOG.md".into()), Stage::Releases]
+        );
     }
 
     #[tokio::test]

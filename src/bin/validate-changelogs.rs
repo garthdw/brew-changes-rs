@@ -4,15 +4,13 @@
 // Usage: cargo run --bin validate-changelogs -- [-cask] [-outdated] [N]
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use brew_changes::github::{Client, HtmlWithoutVersion, Origin, resolve_source};
 use brew_changes::homebrew::{self, Info, Package, brew_info_runner};
-use futures::future::join_all;
+use futures::StreamExt;
 use serde::Deserialize;
-use tokio::sync::Semaphore;
 
 #[derive(Default)]
 struct Outcome {
@@ -44,30 +42,27 @@ async fn main() -> Result<()> {
 
     let infos = homebrew::resolve_info(brew_info_runner(), &packages).await;
     let client = Client::new()?;
-    let semaphore = Arc::new(Semaphore::new(8));
     let checks = packages
         .into_iter()
         .zip(infos)
         .filter(|(_, info)| *info != Info::default())
         .map(|(mut package, info)| {
             let client = client.clone();
-            let semaphore = semaphore.clone();
             async move {
-                let _permit = semaphore
-                    .acquire()
-                    .await
-                    .context("validator semaphore closed")?;
                 // Top-N packages aren't installed, so they're checked at brew's
                 // stable version with nothing to trim back to.
                 if package.current.is_empty() {
                     package.current = info.version.clone();
                 }
-                Ok::<_, anyhow::Error>(validate(&client, &package, &info).await)
+                validate(&client, &package, &info).await
             }
         });
-    for check in join_all(checks).await {
-        results.push(check?);
-    }
+    results.extend(
+        futures::stream::iter(checks)
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await,
+    );
     results.sort_by(|left, right| left.name.cmp(&right.name));
 
     let (mut ok, mut fail, mut skip, mut manual, mut partial) = (0, 0, 0, 0, 0);

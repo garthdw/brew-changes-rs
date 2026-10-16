@@ -47,17 +47,20 @@ fn find_heading(lines: &[&str], version: &str, lax: bool) -> Option<usize> {
     if version.is_empty() {
         return None;
     }
-    version::line_matchers(version).iter().find_map(|matches| {
-        lines.iter().enumerate().position(|(index, line)| {
-            let non_blank = !line.trim().is_empty();
-            let is_atx = line.starts_with('#');
-            let is_setext = non_blank
-                && lines
-                    .get(index + 1)
-                    .is_some_and(|next| is_setext_underline(next));
-            (is_atx || is_setext || (lax && non_blank)) && matches(line)
+    version::line_matchers(version)
+        .into_iter()
+        .find_map(|(needle, allow_longer)| {
+            lines.iter().enumerate().position(|(index, line)| {
+                let non_blank = !line.trim().is_empty();
+                let is_atx = line.starts_with('#');
+                let is_setext = non_blank
+                    && lines
+                        .get(index + 1)
+                        .is_some_and(|next| is_setext_underline(next));
+                (is_atx || is_setext || (lax && non_blank))
+                    && version::in_line(line, needle, allow_longer)
+            })
         })
-    })
 }
 
 fn is_setext_underline(line: &str) -> bool {

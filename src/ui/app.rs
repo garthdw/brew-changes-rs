@@ -4,7 +4,7 @@ use ratatui::text::Line;
 
 use super::keys::{Action, Keymap};
 use super::{markdown, view};
-use crate::github::{Changelog, HtmlWithoutVersion, Origin, Source};
+use crate::github::{Changelog, HtmlWithoutVersion, Origin, Source, Stage};
 
 const HEADER_LINES: u16 = 2;
 const FOOTER_LINES: u16 = 2;
@@ -24,12 +24,18 @@ pub struct Item {
     pub source: Source,
     pub changelog_filename: Option<String>,
     pub expanded: bool,
-    /// "changelog", then the filename, then "releases" while fetching.
-    pub loading_stage: Option<String>,
+    pub loading_stage: Option<Stage>,
     pub body: Option<String>,
-    pub upgrading: bool,
-    pub upgraded: bool,
-    pub upgrade_error: Option<String>,
+    pub upgrade: Upgrade,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum Upgrade {
+    #[default]
+    Idle,
+    Running,
+    Done,
+    Failed(String),
 }
 
 impl Item {
@@ -74,7 +80,7 @@ pub enum Message {
     },
     Stage {
         index: usize,
-        stage: String,
+        stage: Stage,
     },
     Fetched {
         index: usize,
@@ -106,7 +112,6 @@ pub struct App {
     /// Shown in place of the footer hints until the next key press.
     pub notice: Option<String>,
     pub outcome: Option<Outcome>,
-    pub ready: bool,
     pub width: u16,
     pub height: u16,
     pub offset: usize,
@@ -129,7 +134,6 @@ impl App {
             show_help: false,
             notice: None,
             outcome: None,
-            ready: false,
             width: 0,
             height: 1,
             offset: 0,
@@ -143,7 +147,7 @@ impl App {
     pub fn busy(&self) -> bool {
         self.items
             .iter()
-            .any(|item| item.loading_stage.is_some() || item.upgrading)
+            .any(|item| item.loading_stage.is_some() || item.upgrade == Upgrade::Running)
     }
 
     pub fn update(&mut self, message: Message) -> Vec<Effect> {
@@ -151,7 +155,6 @@ impl App {
             Message::Resize { width, height } => {
                 self.width = width;
                 self.height = height.saturating_sub(HEADER_LINES + FOOTER_LINES).max(1);
-                self.ready = true;
                 self.refresh();
                 self.scroll_to_cursor();
             }
@@ -180,9 +183,7 @@ impl App {
             }
             Message::UpgradeDone { index, error } => {
                 if let Some(item) = self.items.get_mut(index) {
-                    item.upgrading = false;
-                    item.upgraded = error.is_none();
-                    item.upgrade_error = error;
+                    item.upgrade = error.map_or(Upgrade::Done, Upgrade::Failed);
                     self.refresh();
                 }
             }
@@ -197,57 +198,54 @@ impl App {
     }
 
     fn key(&mut self, key: &str) -> Vec<Effect> {
-        if self.show_help {
-            self.show_help = false;
+        if std::mem::take(&mut self.show_help) {
             return vec![];
         }
         let Some(action) = self.keymap.lookup(key) else {
             return vec![];
         };
-        if action == Action::Help {
-            self.show_help = true;
-            return vec![];
-        }
-        if action == Action::Quit {
-            self.outcome = Some(Outcome::Quit);
-            return vec![];
-        }
-        if action == Action::UpgradeAll {
-            if !self.items.iter().any(|item| item.upgrading) {
-                self.outcome = Some(Outcome::UpgradeAll);
-            }
-            return vec![];
-        }
-        let cursor = self.cursor;
-        let Some(expanded) = self.items.get(cursor).map(|item| item.expanded) else {
-            return vec![];
-        };
         match action {
-            Action::MoveUpOrScrollUp if expanded => self.offset = self.offset.saturating_sub(1),
-            Action::MoveDownOrScrollDown if expanded => {
-                self.offset = (self.offset + 1).min(self.max_offset())
+            Action::Help => self.show_help = true,
+            Action::Quit => self.outcome = Some(Outcome::Quit),
+            Action::UpgradeAll => {
+                if !self
+                    .items
+                    .iter()
+                    .any(|item| item.upgrade == Upgrade::Running)
+                {
+                    self.outcome = Some(Outcome::UpgradeAll);
+                }
             }
-            Action::MoveUp | Action::MoveUpOrScrollUp => self.move_cursor(-1),
-            Action::MoveDown | Action::MoveDownOrScrollDown => self.move_cursor(1),
-            _ => {}
+            _ => return self.item_key(action),
         }
+        vec![]
+    }
+
+    fn item_key(&mut self, action: Action) -> Vec<Effect> {
+        let cursor = self.cursor;
         let Some(item) = self.items.get_mut(cursor) else {
             return vec![];
         };
         match action {
+            Action::MoveUpOrScrollUp if item.expanded => {
+                self.offset = self.offset.saturating_sub(1)
+            }
+            Action::MoveDownOrScrollDown if item.expanded => {
+                self.offset = (self.offset + 1).min(self.max_offset())
+            }
+            Action::MoveUp | Action::MoveUpOrScrollUp => self.move_cursor(-1),
+            Action::MoveDown | Action::MoveDownOrScrollDown => self.move_cursor(1),
             Action::ToggleExpand => {
                 item.expanded = !item.expanded;
                 let fetch = item.expanded && item.body.is_none() && item.loading_stage.is_none();
                 if fetch {
-                    item.loading_stage = Some("changelog".into());
+                    item.loading_stage = Some(Stage::Changelog);
                 }
                 self.refresh();
                 self.scroll_to_cursor();
-                return if fetch {
-                    vec![Effect::Fetch(cursor)]
-                } else {
-                    vec![]
-                };
+                if fetch {
+                    return vec![Effect::Fetch(cursor)];
+                }
             }
             Action::OpenHomepage => {
                 return item.homepage_url().map(Effect::Open).into_iter().collect();
@@ -257,16 +255,15 @@ impl App {
                 return item.changelog_url().map(Effect::Open).into_iter().collect();
             }
             Action::UpgradeCurrent => {
-                if item.upgraded || item.upgrading {
+                if matches!(item.upgrade, Upgrade::Running | Upgrade::Done) {
                     return vec![];
                 }
-                item.upgrading = true;
-                item.upgrade_error = None;
+                item.upgrade = Upgrade::Running;
                 self.refresh();
                 self.scroll_to_cursor();
                 return vec![Effect::Upgrade(cursor)];
             }
-            _ => {}
+            Action::Help | Action::Quit | Action::UpgradeAll => {}
         }
         vec![]
     }
@@ -305,8 +302,8 @@ impl App {
             .saturating_sub(FRAME_CHROME)
             .min(MAX_BODY_WIDTH);
         for (index, item) in self.items.iter().enumerate() {
+            // Collapsed bodies stay cached so re-expanding doesn't re-render.
             let Some(source) = body_markdown(item) else {
-                self.body_cache.remove(&index);
                 continue;
             };
             let cached =
@@ -332,23 +329,22 @@ impl App {
 }
 
 fn body_markdown(item: &Item) -> Option<String> {
-    if !item.expanded {
+    let error = match &item.upgrade {
+        Upgrade::Failed(error) => Some(error),
+        _ => None,
+    };
+    if !item.expanded || (error.is_none() && item.body.is_none()) {
         return None;
     }
     // A tilde fence, since brew's output may itself contain backtick fences.
-    let failure = item.upgrade_error.as_ref().map(|error| {
-        let lines: Vec<&str> = error.lines().collect();
-        let tail = lines[lines.len().saturating_sub(UPGRADE_ERROR_LINES)..].join("\n");
-        format!("**Upgrade failed:**\n\n~~~~\n{tail}\n~~~~\n\n")
-    });
-    match (failure, &item.body) {
-        (None, None) => None,
-        (failure, body) => Some(format!(
-            "{}{}",
-            failure.unwrap_or_default(),
-            body.as_deref().unwrap_or_default()
-        )),
-    }
+    let failure = error
+        .map(|error| {
+            let lines: Vec<&str> = error.lines().collect();
+            let tail = lines[lines.len().saturating_sub(UPGRADE_ERROR_LINES)..].join("\n");
+            format!("**Upgrade failed:**\n\n~~~~\n{tail}\n~~~~\n\n")
+        })
+        .unwrap_or_default();
+    Some(failure + item.body.as_deref().unwrap_or_default())
 }
 
 /// PRD FR-10.2.
@@ -494,7 +490,7 @@ mod tests {
         let mut app = ready(items(1));
         assert_eq!(key(&mut app, "enter"), [Effect::Fetch(0)]);
         assert!(app.items[0].expanded);
-        assert_eq!(app.items[0].loading_stage.as_deref(), Some("changelog"));
+        assert_eq!(app.items[0].loading_stage, Some(Stage::Changelog));
         assert!(key(&mut app, "enter").is_empty());
         assert!(!app.items[0].expanded);
         // Re-expanding while the fetch is in flight doesn't start another.
@@ -525,12 +521,12 @@ mod tests {
         key(&mut app, "enter");
         app.update(Message::Stage {
             index: 0,
-            stage: "CHANGELOG.md".into(),
+            stage: Stage::File("CHANGELOG.md".into()),
         });
         assert!(line_text(&app).contains("checking CHANGELOG.md..."));
         app.update(Message::Stage {
             index: 0,
-            stage: "releases".into(),
+            stage: Stage::Releases,
         });
         assert!(line_text(&app).contains("fetching releases..."));
     }
@@ -545,7 +541,7 @@ mod tests {
         });
         app.update(Message::Stage {
             index: 5,
-            stage: "x".into(),
+            stage: Stage::Releases,
         });
         app.update(Message::UpgradeDone {
             index: 5,
@@ -558,10 +554,10 @@ mod tests {
     #[test]
     fn a_quits_with_upgrade_all_unless_upgrading() {
         let mut app = ready(items(2));
-        app.items[1].upgrading = true;
+        app.items[1].upgrade = Upgrade::Running;
         key(&mut app, "a");
         assert_eq!(app.outcome, None);
-        app.items[1].upgrading = false;
+        app.items[1].upgrade = Upgrade::Idle;
         key(&mut app, "a");
         assert_eq!(app.outcome, Some(Outcome::UpgradeAll));
     }
@@ -569,17 +565,16 @@ mod tests {
     #[test]
     fn u_upgrades_in_place() {
         let mut app = ready(items(2));
-        app.items[0].upgrade_error = Some("old".into());
+        app.items[0].upgrade = Upgrade::Failed("old".into());
         assert_eq!(key(&mut app, "u"), [Effect::Upgrade(0)]);
         assert_eq!(app.outcome, None);
-        assert!(app.items[0].upgrading);
-        assert_eq!(app.items[0].upgrade_error, None);
+        assert_eq!(app.items[0].upgrade, Upgrade::Running);
         assert!(key(&mut app, "u").is_empty(), "already upgrading");
         app.update(Message::UpgradeDone {
             index: 0,
             error: None,
         });
-        assert!(app.items[0].upgraded && !app.items[0].upgrading);
+        assert_eq!(app.items[0].upgrade, Upgrade::Done);
         assert!(key(&mut app, "u").is_empty(), "already upgraded");
     }
 
@@ -591,7 +586,7 @@ mod tests {
             index: 0,
             error: Some("brew upgrade pkg0: exit 1\nError: boom".into()),
         });
-        assert!(!app.items[0].upgraded);
+        assert!(matches!(app.items[0].upgrade, Upgrade::Failed(_)));
         assert!(line_text(&app).contains("[upgrade failed]"));
         assert!(!line_text(&app).contains("Error: boom"));
         app.items[0].body = Some("notes".into());
@@ -682,12 +677,10 @@ mod tests {
     #[test]
     fn resize_sets_viewport_clamped_to_one() {
         let mut app = App::new(items(2), Keymap::default(), true);
-        assert!(!app.ready);
         app.update(Message::Resize {
             width: 100,
             height: 20,
         });
-        assert!(app.ready);
         assert_eq!((app.width, app.height), (100, 16));
         app.update(Message::Resize {
             width: 100,
@@ -701,7 +694,7 @@ mod tests {
         let mut app = ready(items(1));
         app.update(Message::Tick);
         assert_eq!(app.spinner, 0);
-        app.items[0].upgrading = true;
+        app.items[0].upgrade = Upgrade::Running;
         app.update(Message::Tick);
         assert_eq!(app.spinner, 1);
     }

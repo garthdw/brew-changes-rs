@@ -6,6 +6,7 @@ use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::time::MissedTickBehavior;
 
 use super::app::{App, Effect, Item, Message, Outcome, changelog_body};
 use super::keys::{Keymap, key_name};
@@ -40,6 +41,8 @@ async fn event_loop(
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
+    // Ticks are only polled while busy; don't replay those missed while idle.
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let size = terminal.size()?;
     app.update(Message::Resize {
         width: size.width,
@@ -89,13 +92,7 @@ fn spawn_effect(effect: Effect, app: &App, client: &Client, sender: &UnboundedSe
                 async move {
                     let changelog = client
                         .fetch(&item.source, &item.installed, &item.current, |stage| {
-                            send(
-                                &sender,
-                                Message::Stage {
-                                    index,
-                                    stage: stage.into(),
-                                },
-                            );
+                            send(&sender, Message::Stage { index, stage });
                         })
                         .await;
                     let body = changelog_body(&item, &changelog);

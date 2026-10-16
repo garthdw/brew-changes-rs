@@ -3,6 +3,8 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
+use crate::version::shorten;
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Entry {
@@ -22,7 +24,6 @@ fn parse(data: &str) -> HashMap<String, Entry> {
         return HashMap::new();
     };
     raw.into_iter()
-        .filter(|(name, _)| name != "_comment")
         .filter_map(|(name, value)| Some((name, serde_json::from_value(value).ok()?)))
         .collect()
 }
@@ -32,11 +33,9 @@ pub fn get(name: &str) -> Entry {
 }
 
 pub fn expand_url(url: &str, version: &str) -> String {
-    let parts: Vec<&str> = version.split('.').collect();
-    let major_minor = parts.iter().take(2).copied().collect::<Vec<_>>().join(".");
     url.replace("{version}", version)
-        .replace("{major.minor}", &major_minor)
-        .replace("{major}", parts.first().copied().unwrap_or_default())
+        .replace("{major.minor}", &shorten(version, 2))
+        .replace("{major}", &shorten(version, 1))
 }
 
 #[cfg(test)]

@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Action {
     MoveUp,
     MoveDown,
@@ -17,30 +18,6 @@ pub enum Action {
     UpgradeCurrent,
     Help,
     Quit,
-}
-
-const NAMES: [(Action, &str); 12] = [
-    (Action::MoveUp, "move-up"),
-    (Action::MoveDown, "move-down"),
-    (Action::MoveUpOrScrollUp, "move-up-or-scroll-up"),
-    (Action::MoveDownOrScrollDown, "move-down-or-scroll-down"),
-    (Action::ToggleExpand, "toggle-expand"),
-    (Action::OpenHomepage, "open-homepage"),
-    (Action::OpenGithub, "open-github"),
-    (Action::OpenChangelog, "open-changelog"),
-    (Action::UpgradeAll, "upgrade-all"),
-    (Action::UpgradeCurrent, "upgrade-current"),
-    (Action::Help, "help"),
-    (Action::Quit, "quit"),
-];
-
-impl Action {
-    fn from_name(name: &str) -> Option<Self> {
-        NAMES
-            .iter()
-            .find(|(_, action_name)| *action_name == name)
-            .map(|(action, _)| *action)
-    }
 }
 
 const DEFAULTS: [(&str, Action); 15] = [
@@ -150,17 +127,15 @@ impl Keymap {
                 continue;
             }
             for (key, action) in bindings {
-                match action
-                    .as_deref()
-                    .map(|name| (name, Action::from_name(name)))
-                {
-                    None => {
-                        self.0.remove(&key);
+                let Some(name) = action else {
+                    self.0.remove(&key);
+                    continue;
+                };
+                match serde_json::from_value(name.as_str().into()) {
+                    Ok(action) => {
+                        self.0.insert(key, action);
                     }
-                    Some((_, Some(a))) => {
-                        self.0.insert(key, a);
-                    }
-                    Some((name, None)) => warnings.push(format!(
+                    Err(_) => warnings.push(format!(
                         "keymap: main.{key} has unknown action {name:?}, ignoring"
                     )),
                 }

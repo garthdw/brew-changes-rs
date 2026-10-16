@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::OnceCell;
 use url::Url;
 
-pub use fetch::{Changelog, HtmlWithoutVersion, Origin};
+pub use fetch::{Changelog, HtmlWithoutVersion, Origin, Stage};
 pub use releases::Release;
 pub use source::{Source, resolve_source};
 

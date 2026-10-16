@@ -8,7 +8,8 @@ use crate::version::matches_tag;
 const MAX_RELEASE_PAGES: usize = 3;
 const RELEASE_CAP: usize = 20;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct Release {
     pub tag_name: String,
     #[serde(default, deserialize_with = "null_as_default")]

@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
-use futures::future::{BoxFuture, join_all};
+use futures::StreamExt;
+use futures::future::BoxFuture;
 use serde::Deserialize;
 use tokio::process::Command;
-use tokio::sync::Semaphore;
 
 // A single unresolvable name fails a whole `brew info` call, so batches bound
 // the blast radius before bisection.
@@ -201,19 +201,11 @@ pub async fn resolve_info_batch(
     names: &[String],
     is_cask: bool,
 ) -> Result<HashMap<String, Info>> {
-    let semaphore = Arc::new(Semaphore::new(INFO_CONCURRENCY));
-    let results = join_all(names.chunks(INFO_BATCH_SIZE).map(|chunk| {
-        let semaphore = semaphore.clone();
-        let run = run.clone();
-        async move {
-            let _permit = semaphore
-                .acquire()
-                .await
-                .context("brew info semaphore closed")?;
-            resolve_chunk(run, chunk.to_vec(), is_cask).await
-        }
-    }))
-    .await;
+    let results: Vec<_> = futures::stream::iter(names.chunks(INFO_BATCH_SIZE))
+        .map(|chunk| resolve_chunk(run.clone(), chunk.to_vec(), is_cask))
+        .buffer_unordered(INFO_CONCURRENCY)
+        .collect()
+        .await;
     let mut infos = HashMap::new();
     let mut first_error = None;
     for result in results {
@@ -296,23 +288,24 @@ pub async fn resolve_info(run: Arc<InfoRunner>, packages: &[Package]) -> Vec<Inf
         .collect()
 }
 
-fn upgrade_args(name: &str, is_cask: bool) -> Vec<&str> {
-    if is_cask {
-        vec!["upgrade", "--cask", name]
-    } else {
-        vec!["upgrade", name]
-    }
+fn upgrade_args<'a>(names: &[&'a str], is_cask: bool) -> Vec<&'a str> {
+    ["upgrade"]
+        .into_iter()
+        .chain(is_cask.then_some("--cask"))
+        .chain(names.iter().copied())
+        .collect()
 }
 
 /// Output is captured because the UI owns the terminal; the error carries it
 /// so the UI can show it.
 pub async fn upgrade_quiet(name: &str, is_cask: bool) -> Result<()> {
-    let args = upgrade_args(name, is_cask);
+    let args = upgrade_args(&[name], is_cask);
+    let command = format!("brew {}", args.join(" "));
     let output = Command::new("brew")
         .args(&args)
         .output()
         .await
-        .with_context(|| format!("brew {}", args.join(" ")))?;
+        .with_context(|| command.clone())?;
     if output.status.success() {
         return Ok(());
     }
@@ -321,27 +314,19 @@ pub async fn upgrade_quiet(name: &str, is_cask: bool) -> Result<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    Err(anyhow!(
-        "brew {}: {}\n{}",
-        args.join(" "),
-        output.status,
-        combined.trim()
-    ))
+    Err(anyhow!("{command}: {}\n{}", output.status, combined.trim()))
 }
 
 /// Casks are attempted even if the formula upgrade fails, and every failure
 /// is reported.
 pub async fn upgrade_all(formulae: &[String], casks: &[String]) -> Result<()> {
     let mut failures = vec![];
-    for (names, flag) in [(formulae, None), (casks, Some("--cask"))] {
+    for (names, is_cask) in [(formulae, false), (casks, true)] {
         if names.is_empty() {
             continue;
         }
-        let args: Vec<&str> = ["upgrade"]
-            .into_iter()
-            .chain(flag)
-            .chain(names.iter().map(String::as_str))
-            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let args = upgrade_args(&names, is_cask);
         let command = format!("brew {}", args.join(" "));
         match Command::new("brew").args(&args).status().await {
             Ok(status) if status.success() => {}

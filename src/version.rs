@@ -1,10 +1,10 @@
-// A trailing "." is allowed after a match ("3.1" inside "3.1.0") because
-// brew's version is sometimes less precise than a changelog heading.
-pub fn in_line(line: &str, version: &str) -> bool {
-    in_line_with(line, version, true)
+pub fn shorten(version: &str, parts: usize) -> String {
+    version.split('.').take(parts).collect::<Vec<_>>().join(".")
 }
 
-fn in_line_with(line: &str, version: &str, allow_longer: bool) -> bool {
+/// `allow_longer` lets "3.1" match inside "3.1.0", because brew's version is
+/// sometimes less precise than a changelog heading.
+pub fn in_line(line: &str, version: &str, allow_longer: bool) -> bool {
     if version.is_empty() {
         return false;
     }
@@ -24,19 +24,17 @@ fn in_line_with(line: &str, version: &str, allow_longer: bool) -> bool {
         })
 }
 
-pub type LineMatcher<'a> = Box<dyn Fn(&str) -> bool + 'a>;
-
-/// Tried in order. The second matcher drops a trailing ".0" from three-plus
+/// `in_line` arguments, tried in order. The second drops a trailing ".0" from three-plus
 /// part versions because some projects omit it (gcc's "GCC 16.2", git's
 /// "Git v2.56"); it must match exactly so "2.5" (for "2.5.0") doesn't match
 /// "2.5.1".
-pub fn line_matchers(version: &str) -> Vec<LineMatcher<'_>> {
-    let mut matchers: Vec<LineMatcher> = vec![Box::new(move |line| in_line(line, version))];
+pub fn line_matchers(version: &str) -> Vec<(&str, bool)> {
+    let mut matchers = vec![(version, true)];
     if let Some(short) = version
         .strip_suffix(".0")
         .filter(|short| short.contains('.'))
     {
-        matchers.push(Box::new(move |line| in_line_with(line, short, false)));
+        matchers.push((short, false));
     }
     matchers
 }
@@ -134,7 +132,7 @@ mod tests {
         ];
         for (line, version, want) in cases {
             assert_eq!(
-                in_line(line, version),
+                in_line(line, version, true),
                 want,
                 "in_line({line:?}, {version:?})"
             );
@@ -153,7 +151,7 @@ mod tests {
         for (version, line, want) in cases {
             let got: Vec<bool> = line_matchers(version)
                 .iter()
-                .map(|matcher| matcher(line))
+                .map(|&(needle, allow_longer)| in_line(line, needle, allow_longer))
                 .collect();
             assert_eq!(got, want, "line_matchers({version:?}) on {line:?}");
         }

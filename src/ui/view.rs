@@ -1,12 +1,13 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Item};
+use super::app::{App, Item, Upgrade};
 use super::keys::{self, Action};
+use crate::github::Stage;
 
 pub const ACCENT: Color = Color::Rgb(0x00, 0xD7, 0x87);
 pub const BORDER: Color = Color::Rgb(0x58, 0x58, 0x58);
@@ -60,9 +61,10 @@ pub fn list_lines<'a>(
         let mut content: Vec<Line<'static>> =
             body_for(index).map(<[_]>::to_vec).unwrap_or_default();
         if let Some(stage) = &item.loading_stage {
-            let text = match stage.as_str() {
-                "releases" => " fetching releases...".to_string(),
-                stage => format!(" checking {stage}..."),
+            let text = match stage {
+                Stage::Changelog => " checking changelog...".to_string(),
+                Stage::File(filename) => format!(" checking {filename}..."),
+                Stage::Releases => " fetching releases...".to_string(),
             };
             content.push(Line::from(vec![spinner(app), Span::raw(text)]));
         }
@@ -75,16 +77,15 @@ pub fn list_lines<'a>(
 }
 
 fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
-    let selected = index == app.cursor && !item.expanded && !item.upgraded;
     let (mut cursor, mut version, mut hint, mut name) = (
         Style::new().fg(ACCENT),
         Style::new().fg(VERSION),
         dim(),
         Style::new(),
     );
-    if item.upgraded {
+    if item.upgrade == Upgrade::Done {
         (cursor, version, name) = (dim(), dim(), dim());
-    } else if selected {
+    } else if index == app.cursor && !item.expanded {
         (cursor, version, hint, name) = (
             cursor.patch(bold()),
             version.patch(bold()),
@@ -110,15 +111,16 @@ fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
         Span::raw("  "),
         Span::styled(source_hint, hint),
     ];
-    if item.upgraded {
-        spans.extend([Span::raw("  "), Span::styled("[upgraded]", dim())]);
-    } else if item.upgrading {
-        spans.extend([Span::raw("  "), spinner(app), Span::raw(" upgrading...")]);
-    } else if item.upgrade_error.is_some() {
-        spans.extend([
+    match item.upgrade {
+        Upgrade::Idle => {}
+        Upgrade::Running => {
+            spans.extend([Span::raw("  "), spinner(app), Span::raw(" upgrading...")]);
+        }
+        Upgrade::Done => spans.extend([Span::raw("  "), Span::styled("[upgraded]", dim())]),
+        Upgrade::Failed(_) => spans.extend([
             Span::raw("  "),
             Span::styled("[upgrade failed]", Style::new().fg(ERROR)),
-        ]);
+        ]),
     }
     Line::from(spans)
 }
@@ -172,7 +174,7 @@ pub fn hints(app: &App) -> String {
             Action::UpgradeCurrent,
             "upgrade current",
             50,
-            item.is_some_and(|item| !item.upgraded),
+            item.is_some_and(|item| item.upgrade != Upgrade::Done),
         ),
         (Action::Help, "help", 15, true),
         (Action::Quit, "quit", 90, true),
@@ -203,10 +205,6 @@ pub fn hints(app: &App) -> String {
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    if !app.ready {
-        frame.render_widget(Paragraph::new("Loading..."), area);
-        return;
-    }
     let [header, _, body, _, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -283,13 +281,10 @@ fn draw_help(frame: &mut Frame, app: &App) {
     let height = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
         .saturating_add(4);
-    let width = content_width.saturating_add(6);
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width: width.min(area.width),
-        height: height.min(area.height),
-    };
+    let popup = area.centered(
+        Constraint::Length(content_width.saturating_add(6)),
+        Constraint::Length(height),
+    );
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(BORDER))
@@ -369,13 +364,13 @@ mod tests {
     #[test]
     fn status_tags() {
         let upgraded = Item {
-            upgraded: true,
+            upgrade: Upgrade::Done,
             expanded: true,
             body: Some("changelog body".into()),
             ..item("a")
         };
         let upgrading = Item {
-            upgrading: true,
+            upgrade: Upgrade::Running,
             ..item("b")
         };
         let manual = Item {
@@ -435,7 +430,7 @@ mod tests {
             "[enter] expand/collapse  [u] upgrade current  [q] quit"
         );
         let upgraded = Item {
-            upgraded: true,
+            upgrade: Upgrade::Done,
             ..item("b")
         };
         assert_eq!(
