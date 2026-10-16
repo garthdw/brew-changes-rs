@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 pub fn shorten(version: &str, parts: usize) -> String {
     version.split('.').take(parts).collect::<Vec<_>>().join(".")
 }
@@ -113,6 +115,117 @@ fn without_leading_zeros(component: &str) -> &str {
     }
 }
 
+/// Semver-style precedence for real-world versions. The numeric core compares
+/// numerically, missing parts counting as 0 ("1.27" equals "1.27.0"). Then
+/// pre-releases ("rc1", "-beta.2", Python's "a1") sort before the release and
+/// other suffixes (tmux's "3.7c", a "-1" revision) after it. Suffixes of the
+/// same kind compare as semver identifiers. "+build" metadata is ignored.
+pub fn compare(left: &str, right: &str) -> Ordering {
+    let (left, right) = (Parsed::new(left), Parsed::new(right));
+    let part = |core: &[u64], index: usize| core.get(index).copied().unwrap_or(0);
+    (0..left.core.len().max(right.core.len()))
+        .map(|index| part(&left.core, index).cmp(&part(&right.core, index)))
+        .find(|ordering| ordering.is_ne())
+        .unwrap_or_else(|| (left.kind, &left.suffix).cmp(&(right.kind, &right.suffix)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Kind {
+    PreRelease,
+    Release,
+    PostRelease,
+}
+
+/// Numbers sort before words, as in semver. Known pre-release words rank by
+/// maturity rather than alphabetically, so "dev" comes before "alpha".
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Identifier {
+    Number(u64),
+    Word(u8, String),
+}
+
+const UNRANKED: u8 = 5;
+
+struct Parsed {
+    core: Vec<u64>,
+    kind: Kind,
+    suffix: Vec<Identifier>,
+}
+
+impl Parsed {
+    fn new(version: &str) -> Self {
+        let version = version.split('+').next().unwrap_or(version);
+        let mut rest = version.trim_start_matches(|character: char| !character.is_ascii_digit());
+        let mut core = vec![];
+        while rest.starts_with(|character: char| character.is_ascii_digit()) {
+            let digits = rest
+                .find(|character: char| !character.is_ascii_digit())
+                .unwrap_or(rest.len());
+            core.push(rest[..digits].parse().unwrap_or(u64::MAX));
+            rest = &rest[digits..];
+            match rest.strip_prefix('.') {
+                Some(after) if after.starts_with(|character: char| character.is_ascii_digit()) => {
+                    rest = after;
+                }
+                _ => break,
+            }
+        }
+        let suffix = identifiers(rest);
+        let kind = match suffix.as_slice() {
+            [] => Kind::Release,
+            [Identifier::Word(_, word)]
+                if ["stable", "final", "release"].contains(&word.as_str()) =>
+            {
+                return Self {
+                    core,
+                    kind: Kind::Release,
+                    suffix: vec![],
+                };
+            }
+            // A lone "a" or "b" is tmux's next release; "a1" is Python's alpha.
+            [Identifier::Word(rank, word), next @ ..]
+                if *rank < UNRANKED
+                    && (word.len() > 1 || matches!(next.first(), Some(Identifier::Number(_)))) =>
+            {
+                Kind::PreRelease
+            }
+            _ => Kind::PostRelease,
+        };
+        Self { core, kind, suffix }
+    }
+}
+
+fn identifiers(suffix: &str) -> Vec<Identifier> {
+    let mut identifiers = vec![];
+    let mut rest = suffix;
+    while let Some(start) = rest.find(|character: char| character.is_ascii_alphanumeric()) {
+        rest = &rest[start..];
+        let is_number = rest.starts_with(|character: char| character.is_ascii_digit());
+        let end = rest
+            .find(|character: char| {
+                !character.is_ascii_alphanumeric() || character.is_ascii_digit() != is_number
+            })
+            .unwrap_or(rest.len());
+        let run = &rest[..end];
+        identifiers.push(if is_number {
+            Identifier::Number(run.parse().unwrap_or(u64::MAX))
+        } else {
+            let word = run.to_ascii_lowercase();
+            let rank = match word.as_str() {
+                "dev" => 0,
+                "alpha" | "a" => 1,
+                "beta" | "b" => 2,
+                "pre" | "preview" => 3,
+                "rc" => 4,
+                _ => UNRANKED,
+            };
+            Identifier::Word(rank, word)
+        });
+        rest = &rest[end..];
+    }
+    identifiers
+}
+
 fn is_version_char(byte: u8) -> bool {
     byte.is_ascii_digit() || byte == b'.'
 }
@@ -151,6 +264,63 @@ mod tests {
                 want,
                 "matches_tag({tag:?}, {version:?})"
             );
+        }
+    }
+
+    #[test]
+    fn compare_cases() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let cases = [
+            ("1.27.2", "1.27.1", Greater),
+            ("1.27.0", "1.26.10", Greater),
+            ("1.10", "1.9", Greater),
+            ("1.27", "1.27.0", Equal),
+            ("v1.2.3", "1.2.3", Equal),
+            ("2026.07.04", "2026.7.4", Equal),
+            ("1.0", "1.0", Equal),
+            ("3.7c", "3.7", Greater),
+            ("3.7c", "3.7b", Greater),
+            ("3.7a", "3.7", Greater),
+            ("1.2.3-1", "1.2.3", Greater),
+            ("1.0.0-rc.1", "1.0.0", Less),
+            ("1.0rc1", "1.0", Less),
+            ("1.0rc1", "0.9", Greater),
+            ("1.0.0-dev", "1.0.0-alpha", Less),
+            ("3.14.0a1", "3.14.0", Less),
+            ("3.14.0b1", "3.14.0a2", Greater),
+            ("7.30 beta 1", "7.23", Greater),
+            ("7.30 beta 1", "7.30", Less),
+            ("1.0.0+build.5", "1.0.0", Equal),
+            ("4.7.2-stable", "4.7.2", Equal),
+        ];
+        for (left, right, want) in cases {
+            assert_eq!(compare(left, right), want, "compare({left:?}, {right:?})");
+            assert_eq!(
+                compare(right, left),
+                want.reverse(),
+                "compare({right:?}, {left:?})"
+            );
+        }
+    }
+
+    /// The precedence example from semver.org, section 11.
+    #[test]
+    fn compare_follows_semver_precedence() {
+        let ascending = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+            "1.0.1",
+            "1.1.0",
+            "2.0.0",
+        ];
+        for pair in ascending.windows(2) {
+            assert_eq!(compare(pair[0], pair[1]), Ordering::Less, "{pair:?}");
         }
     }
 

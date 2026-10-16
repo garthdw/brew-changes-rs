@@ -87,44 +87,72 @@ pub fn expand(template: &str, version: &str) -> String {
 /// HTML pages are converted to Markdown. `None` matches any version, to find
 /// where a section ends when there's no installed version to stop at.
 pub fn heading_matches(template: &str, line: &str, version: Option<&str>) -> bool {
+    match_line(&tokens(template), heading_text(line), version).is_some()
+}
+
+/// The version a heading names, as written by its first placeholder.
+pub fn heading_version<'line>(template: &str, line: &'line str) -> Option<&'line str> {
+    match_line(&tokens(template), heading_text(line), None).flatten()
+}
+
+/// `version` as the template's first placeholder writes it, to compare with
+/// `heading_version`.
+pub fn version_text(template: &str, version: &str) -> Option<String> {
+    tokens(template)
+        .into_iter()
+        .find(|token| matches!(token, Token::Whole | Token::Parts { .. }))
+        .map(|token| render(token, version))
+}
+
+fn heading_text(line: &str) -> &str {
     let line = line.trim();
-    let line = match line.trim_start_matches('#') {
+    match line.trim_start_matches('#') {
         stripped if stripped.len() < line.len() && stripped.starts_with(' ') => {
             stripped.trim_start()
         }
         _ => line,
-    };
-    matches(&tokens(template), line, version)
+    }
 }
 
-fn matches(tokens: &[Token<'_>], text: &str, version: Option<&str>) -> bool {
+/// `Some` on a match, holding the text of the first placeholder if any.
+fn match_line<'text>(
+    tokens: &[Token<'_>],
+    text: &'text str,
+    version: Option<&str>,
+) -> Option<Option<&'text str>> {
     let Some((&token, rest)) = tokens.split_first() else {
-        return text.is_empty();
+        return text.is_empty().then_some(None);
     };
     match (token, version) {
-        (Token::Literal(literal), _) => text
-            .strip_prefix(literal)
-            .is_some_and(|text| matches(rest, text, version)),
+        (Token::Literal(literal), _) => match_line(rest, text.strip_prefix(literal)?, version),
         (Token::Any, _) => text
             .char_indices()
             .map(|(index, _)| index)
             .chain([text.len()])
-            .any(|index| matches(rest, &text[index..], version)),
-        (_, Some(version)) => text
-            .strip_prefix(render(token, version).as_str())
-            .is_some_and(|after| !continues_version(after) && matches(rest, after, Some(version))),
+            .find_map(|index| match_line(rest, &text[index..], version)),
+        (_, Some(version)) => {
+            let rendered = render(token, version);
+            let after = text.strip_prefix(rendered.as_str())?;
+            if continues_version(after) {
+                return None;
+            }
+            match_line(rest, after, Some(version)).map(|_| Some(&text[..rendered.len()]))
+        }
         (_, None) => {
             if !text.starts_with(|character: char| character.is_ascii_digit()) {
-                return false;
+                return None;
             }
             let run = text
                 .find(|character: char| {
                     !character.is_ascii_alphanumeric() && !"._-".contains(character)
                 })
                 .unwrap_or(text.len());
-            (1..=run)
-                .rev()
-                .any(|end| !continues_version(&text[end..]) && matches(rest, &text[end..], None))
+            (1..=run).rev().find_map(|end| {
+                if continues_version(&text[end..]) {
+                    return None;
+                }
+                match_line(rest, &text[end..], None).map(|_| Some(&text[..end]))
+            })
         }
     }
 }
@@ -229,6 +257,50 @@ mod tests {
                 "{template:?} on {line:?} for {version:?}"
             );
         }
+    }
+
+    #[test]
+    fn heading_version_cases() {
+        let cases = [
+            (
+                "go{version} (released {*}",
+                "go1.27.2 (released 2026-10-08) includes",
+                Some("1.27.2"),
+            ),
+            (
+                "go{version} (released {*}",
+                "## go1.27.0 (released 2026-08-19)",
+                Some("1.27.0"),
+            ),
+            (
+                "CHANGES FROM {*} TO {version}",
+                "CHANGES FROM 3.7b TO 3.7c",
+                Some("3.7c"),
+            ),
+            ("v{major.minor}: {*}", "v2.15: Sep 01 2026", Some("2.15")),
+            ("version {version}:", "version <next>:", None),
+            ("version {version}:", "unrelated", None),
+        ];
+        for (template, line, want) in cases {
+            assert_eq!(
+                heading_version(template, line),
+                want,
+                "{template:?} on {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_text_cases() {
+        assert_eq!(
+            version_text("go{version} ({*}", "1.27.2").as_deref(),
+            Some("1.27.2")
+        );
+        assert_eq!(
+            version_text("[v{major.minor}]({*}", "2.8.1").as_deref(),
+            Some("2.8")
+        );
+        assert_eq!(version_text("no placeholder", "2.8.1"), None);
     }
 
     #[test]

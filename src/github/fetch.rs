@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::source::parse_github_file_url;
 use super::{Client, Release, Source};
-use crate::changelog::{Section, trim_to_range};
+use crate::changelog::{Order, Section, trim_to_range};
 use crate::template;
 use crate::version::matches_tag;
 
@@ -82,7 +82,13 @@ impl Client {
         };
         if !source.manual_url.is_empty() {
             return self
-                .fetch_manual_section(&source.manual_url, &current, &installed, &source.heading)
+                .fetch_manual_section(
+                    &source.manual_url,
+                    &current,
+                    &installed,
+                    &source.heading,
+                    source.order,
+                )
                 .await;
         }
         if !source.has_repo() {
@@ -103,7 +109,13 @@ impl Client {
                     text: section,
                     found: true,
                     end,
-                } = trim_to_range(&content, &current, &installed, &source.heading)
+                } = trim_to_range(
+                    &content,
+                    &current,
+                    &installed,
+                    &source.heading,
+                    source.order,
+                )
             {
                 return Changelog::File {
                     filename,
@@ -142,6 +154,7 @@ impl Client {
         new_version: &str,
         installed: &str,
         heading: &str,
+        order: Order,
     ) -> Changelog {
         let fetched = match parse_github_file_url(url) {
             Some(file) => self
@@ -154,7 +167,8 @@ impl Client {
             Ok(fetched) => fetched,
             Err(error) => return Changelog::ManualFailed(error),
         };
-        let Section { text, found, end } = trim_to_range(&content, new_version, installed, heading);
+        let Section { text, found, end } =
+            trim_to_range(&content, new_version, installed, heading, order);
         if is_html && !found {
             return Changelog::ManualHtmlWithoutVersion;
         }
@@ -310,7 +324,13 @@ mod tests {
             .mount(&server)
             .await;
         let got = client
-            .fetch_manual_section(&format!("{}/notes", server.uri()), "2.0.0", "1.0.0", "")
+            .fetch_manual_section(
+                &format!("{}/notes", server.uri()),
+                "2.0.0",
+                "1.0.0",
+                "",
+                Order::NewestFirst,
+            )
             .await;
         assert_eq!(manual(got), ("## 2.0.0\nnew stuff".into(), true));
     }
@@ -325,7 +345,7 @@ mod tests {
             .await;
         let url = format!("{}/notes", server.uri());
         let got = client
-            .fetch_manual_section(&url, "2.0.0", "1.0.0", "")
+            .fetch_manual_section(&url, "2.0.0", "1.0.0", "", Order::NewestFirst)
             .await;
         assert_eq!(
             manual(got),
@@ -333,7 +353,7 @@ mod tests {
         );
 
         let got = client
-            .fetch_manual_section(&url, "3.0.0", "2.0.0", "")
+            .fetch_manual_section(&url, "3.0.0", "2.0.0", "", Order::NewestFirst)
             .await;
         assert!(
             matches!(got, Changelog::ManualHtmlWithoutVersion),
@@ -356,6 +376,7 @@ mod tests {
                 "2.0.0",
                 "1.0.0",
                 "",
+                Order::NewestFirst,
             )
             .await;
         assert_eq!(manual(got), ("## 2.0.0\nnew stuff".into(), true));

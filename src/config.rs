@@ -3,6 +3,8 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
+use crate::changelog::Order;
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Entry {
@@ -11,6 +13,7 @@ pub struct Entry {
     pub prerelease: bool,
     pub heading: String,
     pub version: String,
+    pub order: Order,
 }
 
 static ENTRIES: LazyLock<HashMap<String, Entry>> =
@@ -56,6 +59,17 @@ mod tests {
     #[test]
     fn unknown_field_is_rejected() {
         assert!(parse(r#"{"old": {"url": "u", "lax_headings": true}}"#).is_empty());
+    }
+
+    #[test]
+    fn orders_other_than_newest_first_have_a_heading() {
+        let missing: Vec<&String> = ENTRIES
+            .iter()
+            .filter(|(_, entry)| entry.order != Order::NewestFirst && entry.heading.is_empty())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(missing.is_empty(), "`order` without `heading`: {missing:?}");
+        assert_eq!(get("go").order, Order::Mixed);
     }
 
     #[test]

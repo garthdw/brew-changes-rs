@@ -1,3 +1,7 @@
+use std::cmp::Ordering;
+
+use serde::Deserialize;
+
 use crate::{template, version};
 
 pub const MAX_CONTENT_LINES: usize = 100;
@@ -13,22 +17,38 @@ pub struct Section {
     pub end: Option<String>,
 }
 
+/// How a changelog orders its releases. The other orders need a `heading`
+/// template, to read the version every heading names.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Order {
+    #[default]
+    NewestFirst,
+    OldestFirst,
+    /// Any order, like go's release history: majors newest first, each with
+    /// its point releases oldest first. Releases are picked by comparing
+    /// versions.
+    Mixed,
+}
+
 /// `heading` is a `template` for changelogs whose version headings aren't
 /// Markdown headings (tmux's CHANGES) or mention other versions (vlc's
 /// "Changes between 3.0.23 and 3.0.24:"). With a template and nothing
 /// installed, the next release's heading ends the section.
-pub fn trim_to_range(content: &str, new_version: &str, installed: &str, heading: &str) -> Section {
+pub fn trim_to_range(
+    content: &str,
+    new_version: &str,
+    installed: &str,
+    heading: &str,
+    order: Order,
+) -> Section {
     let lines: Vec<&str> = content.split('\n').collect();
+    if order != Order::NewestFirst && !heading.is_empty() {
+        return trim_by_release(&lines, new_version, installed, heading, order);
+    }
 
     let Some(start) = find_heading(&lines, Some(new_version), heading) else {
-        let head = lines[..MAX_CONTENT_LINES.min(lines.len())].join("\n");
-        return Section {
-            text: format!(
-                "{head}\n\n... (couldn't locate version headings, showing first {MAX_CONTENT_LINES} lines)"
-            ),
-            found: false,
-            end: None,
-        };
+        return not_found(&lines);
     };
 
     // Search only past start, since the new-version heading can itself mention
@@ -58,6 +78,84 @@ pub fn trim_to_range(content: &str, new_version: &str, installed: &str, heading:
         text,
         found: true,
         end: None,
+    }
+}
+
+fn not_found(lines: &[&str]) -> Section {
+    let head = lines[..MAX_CONTENT_LINES.min(lines.len())].join("\n");
+    Section {
+        text: format!(
+            "{head}\n\n... (couldn't locate version headings, showing first {MAX_CONTENT_LINES} lines)"
+        ),
+        found: false,
+        end: None,
+    }
+}
+
+/// Splits the changelog at every release heading and shows the releases after
+/// `installed` up to `new_version`, newest first.
+fn trim_by_release(
+    lines: &[&str],
+    new_version: &str,
+    installed: &str,
+    heading: &str,
+    order: Order,
+) -> Section {
+    let releases: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| Some((index, template::heading_version(heading, line)?)))
+        .collect();
+    let target = template::version_text(heading, new_version).unwrap_or_default();
+    let installed = (!installed.is_empty())
+        .then(|| template::version_text(heading, installed))
+        .flatten();
+    let Some(target_index) = releases.iter().position(|(_, version)| *version == target) else {
+        return not_found(lines);
+    };
+
+    let mut picked: Vec<usize> = match order {
+        Order::Mixed => (0..releases.len())
+            .filter(|&index| {
+                let version = releases[index].1;
+                index == target_index
+                    || installed.as_deref().is_some_and(|installed| {
+                        version::compare(version, installed) == Ordering::Greater
+                            && version::compare(version, &target) != Ordering::Greater
+                    })
+            })
+            .collect(),
+        _ => {
+            let first = installed
+                .and_then(|installed| {
+                    releases[..target_index]
+                        .iter()
+                        .rposition(|(_, version)| *version == installed)
+                })
+                .map_or(target_index, |index| index + 1);
+            (first..=target_index).collect()
+        }
+    };
+    picked.sort_by(|&left, &right| {
+        version::compare(releases[right].1, releases[left].1).then(right.cmp(&left))
+    });
+
+    let release_end = |index: usize| {
+        releases
+            .get(index + 1)
+            .map_or(lines.len(), |(line, _)| *line)
+    };
+    let text = picked
+        .iter()
+        .map(|&index| lines[releases[index].0..release_end(index)].join("\n"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Section {
+        text,
+        found: true,
+        end: releases
+            .get(target_index + 1)
+            .map(|(line, _)| lines[*line].to_string()),
     }
 }
 
@@ -100,7 +198,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     fn trim(content: &str, new_version: &str, installed: &str) -> (String, bool) {
-        let section = trim_to_range(content, new_version, installed, "");
+        let section = trim_to_range(content, new_version, installed, "", Order::NewestFirst);
         (section.text, section.found)
     }
 
@@ -193,6 +291,7 @@ mod tests {
             "3.0.24",
             "3.0.23",
             "Changes between {*} and {version}:",
+            Order::NewestFirst,
         );
         assert_eq!(
             section,
@@ -208,7 +307,13 @@ mod tests {
     #[test]
     fn template_without_installed_ends_at_next_release() {
         let content = "CHANGES FROM 3.7c TO 3.8\n* new\nCHANGES FROM 3.7b TO 3.7c\n* old";
-        let section = trim_to_range(content, "3.8", "", "CHANGES FROM {*} TO {version}");
+        let section = trim_to_range(
+            content,
+            "3.8",
+            "",
+            "CHANGES FROM {*} TO {version}",
+            Order::NewestFirst,
+        );
         assert_eq!(section.text, "CHANGES FROM 3.7c TO 3.8\n* new");
         assert_eq!(section.end.as_deref(), Some("CHANGES FROM 3.7b TO 3.7c"));
     }
@@ -216,15 +321,115 @@ mod tests {
     #[test]
     fn template_ignores_markdown_headings() {
         let content = "## 2.0.0\nVersion 2.0.0 (2026)\nnew\nVersion 1.0.0 (2025)\nold";
-        let section = trim_to_range(content, "2.0.0", "1.0.0", "Version {version} ({*}");
+        let section = trim_to_range(
+            content,
+            "2.0.0",
+            "1.0.0",
+            "Version {version} ({*}",
+            Order::NewestFirst,
+        );
         assert_eq!(section.text, "Version 2.0.0 (2026)\nnew");
+    }
+
+    const GO: &str = "\
+## go1.27.0 (released 2026-08-19)
+go 1.27.0 notes
+### Minor revisions
+go1.27.1 (released 2026-09-01) one
+go1.27.2 (released 2026-10-08) two
+## go1.26.0 (released 2026-02-10)
+go 1.26.0 notes
+go1.26.1 (released 2026-03-05) three
+go1.26.2 (released 2026-04-07) four";
+    const GO_HEADING: &str = "go{version} (released {*}";
+
+    #[test]
+    fn mixed_collects_range_newest_first() {
+        let section = trim_to_range(GO, "1.27.2", "1.26.2", GO_HEADING, Order::Mixed);
+        assert_eq!(
+            section.text,
+            [
+                "go1.27.2 (released 2026-10-08) two",
+                "go1.27.1 (released 2026-09-01) one",
+                "## go1.27.0 (released 2026-08-19)",
+                "go 1.27.0 notes",
+                "### Minor revisions",
+            ]
+            .join("\n")
+        );
+        assert!(section.found);
+        assert_eq!(
+            section.end.as_deref(),
+            Some("## go1.26.0 (released 2026-02-10)")
+        );
+    }
+
+    #[test]
+    fn mixed_point_upgrade_shows_one_release() {
+        let section = trim_to_range(GO, "1.27.2", "1.27.1", GO_HEADING, Order::Mixed);
+        assert_eq!(section.text, "go1.27.2 (released 2026-10-08) two");
+        let section = trim_to_range(GO, "1.27.2", "", GO_HEADING, Order::Mixed);
+        assert_eq!(section.text, "go1.27.2 (released 2026-10-08) two");
+    }
+
+    #[test]
+    fn mixed_target_missing() {
+        let section = trim_to_range(GO, "1.28.0", "1.27.2", GO_HEADING, Order::Mixed);
+        assert!(!section.found);
+    }
+
+    const ASCENDING: &str = "\
+Version 1.0 (2024)
+first
+Version 1.1 (2025)
+second
+Version 1.2 (2026)
+third
+Version 1.3 (2027)
+fourth";
+    const ASCENDING_HEADING: &str = "Version {version} ({*}";
+
+    #[test]
+    fn oldest_first_range_newest_first() {
+        let section = trim_to_range(
+            ASCENDING,
+            "1.2",
+            "1.0",
+            ASCENDING_HEADING,
+            Order::OldestFirst,
+        );
+        assert_eq!(
+            section.text,
+            "Version 1.2 (2026)\nthird\nVersion 1.1 (2025)\nsecond"
+        );
+        assert_eq!(section.end.as_deref(), Some("Version 1.3 (2027)"));
+    }
+
+    #[test]
+    fn oldest_first_installed_missing_shows_target() {
+        for installed in ["0.9", ""] {
+            let section = trim_to_range(
+                ASCENDING,
+                "1.2",
+                installed,
+                ASCENDING_HEADING,
+                Order::OldestFirst,
+            );
+            assert_eq!(section.text, "Version 1.2 (2026)\nthird", "{installed:?}");
+        }
     }
 
     #[test]
     fn end_heading_reported() {
-        let section = trim_to_range("## 2.0.0\nnew\n## 1.0.0\nold", "2.0.0", "1.0.0", "");
+        let section = trim_to_range(
+            "## 2.0.0\nnew\n## 1.0.0\nold",
+            "2.0.0",
+            "1.0.0",
+            "",
+            Order::NewestFirst,
+        );
         assert_eq!(section.end.as_deref(), Some("## 1.0.0"));
-        let section = trim_to_range("## 2.0.0\nnew", "2.0.0", "1.0.0", "");
+        let section = trim_to_range("## 2.0.0\nnew", "2.0.0", "1.0.0", "", Order::NewestFirst);
         assert_eq!(section.end, None);
     }
 

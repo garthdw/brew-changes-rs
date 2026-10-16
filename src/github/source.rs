@@ -1,3 +1,4 @@
+use crate::changelog::Order;
 use crate::{config, template};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -12,6 +13,7 @@ pub struct Source {
     /// A `template` rewriting versions before matching (raycast's "2.8.1.0"
     /// is documented as "v2.8"); empty leaves them as they are.
     pub version_format: String,
+    pub order: Order,
 }
 
 impl Source {
@@ -45,6 +47,7 @@ pub fn resolve_source(name: &str, version: &str, urls: &[&str]) -> Source {
         prereleases_only: entry.prerelease,
         heading: entry.heading,
         version_format: entry.version,
+        order: entry.order,
     }
 }
 
