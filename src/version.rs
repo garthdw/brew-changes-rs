@@ -43,14 +43,37 @@ pub fn line_matchers(version: &str) -> Vec<(&str, bool)> {
 
 /// Matches whatever prefix a project puts on its tags ("v1.8.1", "jq-1.8.1",
 /// "2024-edition-v1.8.1"). The character before the version must not continue
-/// a version number, or "2.3" would match "1.2.3". "-pre" is stripped for
-/// preview channels like zed@preview.
+/// a version number, or "2.3" would match "1.2.3".
 pub fn matches_tag(tag: &str, version: &str) -> bool {
     if version.is_empty() {
         return false;
     }
-    let tag = tag.strip_suffix("-pre").unwrap_or(tag);
+    let tag = without_tag_suffix(tag);
     exact_suffix_match(tag, version) || trailing_components_match(tag, version)
+}
+
+/// Strips suffixes that don't change the version: build metadata (temurin's
+/// "jdk-27+35"), channels ("-pre" for zed@preview, godot's "-stable") and a
+/// commit hash (wezterm's "20240203-110809-5046fc22"). The hash needs a
+/// letter so a date-like "release-20261013" keeps its version.
+fn without_tag_suffix(tag: &str) -> &str {
+    let tag = tag.split_once('+').map_or(tag, |(before, _)| before);
+    if let Some(before) = ["-pre", "-stable"]
+        .iter()
+        .find_map(|suffix| tag.strip_suffix(suffix))
+    {
+        return before;
+    }
+    match tag.rsplit_once('-') {
+        Some((before, hash))
+            if hash.len() >= 7
+                && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && hash.bytes().any(|byte| byte.is_ascii_alphabetic()) =>
+        {
+            before
+        }
+        _ => tag,
+    }
 }
 
 fn exact_suffix_match(tag: &str, version: &str) -> bool {
@@ -113,6 +136,14 @@ mod tests {
             ("2026.07.04", "2026.7.4", true),
             ("v1.20.0-pre", "1.20.0", true),
             ("x.1.2", "1.2", false),
+            ("jdk-27+35", "27", true),
+            ("jdk-11.0.32.1+1", "11.0.32.1", true),
+            ("jdk-11.0.32+9", "11.0.32.1", false),
+            ("4.7.2-stable", "4.7.2", true),
+            ("4.7-stable", "4.7.2", false),
+            ("20240203-110809-5046fc22", "20240203-110809", true),
+            ("release-20261013", "20261013", true),
+            ("v1.8.1-rc1", "1.8.1", false),
         ];
         for (tag, version, want) in cases {
             assert_eq!(

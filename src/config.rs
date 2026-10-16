@@ -3,16 +3,14 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
-use crate::version::shorten;
-
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Entry {
     pub url: String,
     pub repo: String,
-    pub lax_headings: bool,
     pub prerelease: bool,
-    pub version_parts: usize,
+    pub heading: String,
+    pub version: String,
 }
 
 static ENTRIES: LazyLock<HashMap<String, Entry>> =
@@ -32,12 +30,6 @@ pub fn get(name: &str) -> Entry {
     ENTRIES.get(name).cloned().unwrap_or_default()
 }
 
-pub fn expand_url(url: &str, version: &str) -> String {
-    url.replace("{version}", version)
-        .replace("{major.minor}", &shorten(version, 2))
-        .replace("{major}", &shorten(version, 1))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,7 +37,8 @@ mod tests {
     #[test]
     fn get_entries() {
         assert!(!get("rust").url.is_empty());
-        assert!(get("tmux").lax_headings);
+        assert!(!get("tmux").heading.is_empty());
+        assert!(!get("brave-browser").version.is_empty());
         let zed = get("zed@preview");
         assert_eq!(zed.repo, "zed-industries/zed");
         assert!(zed.prerelease);
@@ -61,13 +54,19 @@ mod tests {
     }
 
     #[test]
-    fn expand() {
-        assert_eq!(
-            expand_url(
-                "https://example.com/v{major}/{major.minor}/notes-{version}.html",
-                "9.0.2"
-            ),
-            "https://example.com/v9/9.0/notes-9.0.2.html"
-        );
+    fn unknown_field_is_rejected() {
+        assert!(parse(r#"{"old": {"url": "u", "lax_headings": true}}"#).is_empty());
+    }
+
+    #[test]
+    fn every_embedded_entry_parses() {
+        let raw: HashMap<String, serde_json::Value> =
+            serde_json::from_str(include_str!("changelog_config.json")).unwrap();
+        let mut missing: Vec<&String> = raw
+            .keys()
+            .filter(|name| *name != "_comment" && !ENTRIES.contains_key(*name))
+            .collect();
+        missing.sort();
+        assert!(missing.is_empty(), "entries that don't parse: {missing:?}");
     }
 }

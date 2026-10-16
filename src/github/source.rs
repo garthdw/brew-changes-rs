@@ -1,4 +1,4 @@
-use crate::config;
+use crate::{config, template};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Source {
@@ -6,11 +6,12 @@ pub struct Source {
     pub owner: String,
     pub repo: String,
     pub manual_url: String,
-    pub lax_headings: bool,
     pub prereleases_only: bool,
-    /// Non-zero shortens versions before matching (raycast's "2.8.1.0" is
-    /// documented as "v2.8").
-    pub version_parts: usize,
+    /// A `template` for version headings; empty uses Markdown headings.
+    pub heading: String,
+    /// A `template` rewriting versions before matching (raycast's "2.8.1.0"
+    /// is documented as "v2.8"); empty leaves them as they are.
+    pub version_format: String,
 }
 
 impl Source {
@@ -40,10 +41,10 @@ pub fn resolve_source(name: &str, version: &str, urls: &[&str]) -> Source {
     Source {
         owner,
         repo,
-        manual_url: config::expand_url(&entry.url, version),
-        lax_headings: entry.lax_headings,
+        manual_url: template::expand(&entry.url, version),
         prereleases_only: entry.prerelease,
-        version_parts: entry.version_parts,
+        heading: entry.heading,
+        version_format: entry.version,
     }
 }
 
@@ -231,7 +232,7 @@ mod tests {
                 "tmux",
                 "https://github.com/tmux/tmux",
                 Source {
-                    lax_headings: true,
+                    heading: "CHANGES FROM {*} TO {version}".into(),
                     ..src("tmux", "tmux")
                 },
             ),
@@ -240,8 +241,8 @@ mod tests {
                 "https://raycast.com/",
                 Source {
                     manual_url: "https://www.raycast.com/changelog".into(),
-                    lax_headings: true,
-                    version_parts: 2,
+                    heading: "[v{version}]({*}".into(),
+                    version_format: "{major.minor}".into(),
                     ..Default::default()
                 },
             ),

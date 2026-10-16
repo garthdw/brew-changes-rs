@@ -203,20 +203,28 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
             outcome.source = "manual".into();
             outcome.note = format!("fetch error: {error:#}");
         }
-        Changelog::Manual { section, found } => {
+        Changelog::Manual {
+            section,
+            found,
+            end,
+        } => {
             outcome.source = "manual".into();
             outcome.found = found;
             outcome.manual = found;
             outcome.note = if found {
-                format!("{} bytes from {manual}", section.len())
+                format!("{} bytes from {manual}, {}", section.len(), ending(end))
             } else {
                 format!("version heading not located: {manual}")
             };
         }
-        Changelog::File { filename, section } => {
+        Changelog::File {
+            filename,
+            section,
+            end,
+        } => {
             outcome.found = true;
             outcome.source = format!("file:{filename}");
-            outcome.note = format!("{} bytes", section.len());
+            outcome.note = format!("{} bytes, {}", section.len(), ending(end));
         }
         Changelog::Releases {
             fallback_file,
@@ -253,4 +261,13 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
         }
     }
     outcome
+}
+
+/// Shows where a section stopped, so a heading template that only matches the
+/// newest release (and would show 100 truncated lines) is caught.
+fn ending(end: Option<String>) -> String {
+    match end {
+        Some(heading) => format!("ends at {:?}", heading.trim()),
+        None => "truncated".into(),
+    }
 }

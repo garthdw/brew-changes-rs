@@ -391,7 +391,9 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
             format!("Could not fetch the configured changelog URL.\n\nKnown changelog: {manual}")
         }
         Changelog::Manual { section, .. } => format!("(from {manual})\n\n{section}"),
-        Changelog::File { filename, section } => format!("(from {filename})\n\n{section}"),
+        Changelog::File {
+            filename, section, ..
+        } => format!("(from {filename})\n\n{section}"),
         Changelog::Releases {
             result: Ok(Releases { list, .. }),
             ..
@@ -807,6 +809,7 @@ mod tests {
         let ok = Changelog::Manual {
             section: "## 1.2.3".into(),
             found: true,
+            end: None,
         };
         assert_eq!(
             changelog_body(&manual("https://m"), &ok),
@@ -816,6 +819,7 @@ mod tests {
         let file = Changelog::File {
             filename: "NEWS.md".into(),
             section: "x".into(),
+            end: None,
         };
         assert_eq!(
             changelog_body(&Item::default(), &file),

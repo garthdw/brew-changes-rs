@@ -4,8 +4,9 @@ use serde::Deserialize;
 
 use super::source::parse_github_file_url;
 use super::{Client, Release, Source};
-use crate::changelog::trim_to_range;
-use crate::version::{matches_tag, shorten};
+use crate::changelog::{Section, trim_to_range};
+use crate::template;
+use crate::version::matches_tag;
 
 const BASE_NAMES: [&str; 4] = ["CHANGELOG", "CHANGES", "HISTORY", "NEWS"];
 const EXTENSIONS: [&str; 3] = [".md", ".rst", ""];
@@ -17,6 +18,8 @@ pub enum Changelog {
     Manual {
         section: String,
         found: bool,
+        /// The heading that ended the section; `None` when truncated.
+        end: Option<String>,
     },
     /// Distinct from `ManualFailed` because the opening lines of such a page
     /// are site navigation, not worth showing as an excerpt.
@@ -25,6 +28,7 @@ pub enum Changelog {
     File {
         filename: String,
         section: String,
+        end: Option<String>,
     },
     Releases {
         /// The changelog file that didn't document the version, so the UI can
@@ -68,22 +72,17 @@ impl Client {
         current: &str,
         mut on_stage: impl FnMut(Stage),
     ) -> Changelog {
-        let (installed, current) = if source.version_parts > 0 {
-            (
-                shorten(installed, source.version_parts),
-                shorten(current, source.version_parts),
-            )
-        } else {
+        let (installed, current) = if source.version_format.is_empty() {
             (installed.to_string(), current.to_string())
+        } else {
+            (
+                template::expand(&source.version_format, installed),
+                template::expand(&source.version_format, current),
+            )
         };
         if !source.manual_url.is_empty() {
             return self
-                .fetch_manual_section(
-                    &source.manual_url,
-                    &current,
-                    &installed,
-                    source.lax_headings,
-                )
+                .fetch_manual_section(&source.manual_url, &current, &installed, &source.heading)
                 .await;
         }
         if !source.has_repo() {
@@ -100,10 +99,17 @@ impl Client {
             if let Ok(content) = self
                 .fetch_github_file(&source.owner, &source.repo, &filename, None)
                 .await
-                && let (section, true) =
-                    trim_to_range(&content, &current, &installed, source.lax_headings)
+                && let Section {
+                    text: section,
+                    found: true,
+                    end,
+                } = trim_to_range(&content, &current, &installed, &source.heading)
             {
-                return Changelog::File { filename, section };
+                return Changelog::File {
+                    filename,
+                    section,
+                    end,
+                };
             }
             fallback_file = Some(filename);
         }
@@ -135,7 +141,7 @@ impl Client {
         url: &str,
         new_version: &str,
         installed: &str,
-        lax: bool,
+        heading: &str,
     ) -> Changelog {
         let fetched = match parse_github_file_url(url) {
             Some(file) => self
@@ -148,11 +154,15 @@ impl Client {
             Ok(fetched) => fetched,
             Err(error) => return Changelog::ManualFailed(error),
         };
-        let (section, found) = trim_to_range(&content, new_version, installed, lax);
+        let Section { text, found, end } = trim_to_range(&content, new_version, installed, heading);
         if is_html && !found {
             return Changelog::ManualHtmlWithoutVersion;
         }
-        Changelog::Manual { section, found }
+        Changelog::Manual {
+            section: text,
+            found,
+            end,
+        }
     }
 
     /// One root listing instead of probing each filename, which adds seconds
@@ -266,7 +276,7 @@ mod tests {
 
     fn manual(changelog: Changelog) -> (String, bool) {
         match changelog {
-            Changelog::Manual { section, found } => (section, found),
+            Changelog::Manual { section, found, .. } => (section, found),
             other => panic!("not a manual section: {other:?}"),
         }
     }
@@ -300,7 +310,7 @@ mod tests {
             .mount(&server)
             .await;
         let got = client
-            .fetch_manual_section(&format!("{}/notes", server.uri()), "2.0.0", "1.0.0", false)
+            .fetch_manual_section(&format!("{}/notes", server.uri()), "2.0.0", "1.0.0", "")
             .await;
         assert_eq!(manual(got), ("## 2.0.0\nnew stuff".into(), true));
     }
@@ -315,7 +325,7 @@ mod tests {
             .await;
         let url = format!("{}/notes", server.uri());
         let got = client
-            .fetch_manual_section(&url, "2.0.0", "1.0.0", false)
+            .fetch_manual_section(&url, "2.0.0", "1.0.0", "")
             .await;
         assert_eq!(
             manual(got),
@@ -323,7 +333,7 @@ mod tests {
         );
 
         let got = client
-            .fetch_manual_section(&url, "3.0.0", "2.0.0", false)
+            .fetch_manual_section(&url, "3.0.0", "2.0.0", "")
             .await;
         assert!(
             matches!(got, Changelog::ManualHtmlWithoutVersion),
@@ -345,7 +355,7 @@ mod tests {
                 "https://github.com/owner/repo/blob/main/CHANGELOG.md",
                 "2.0.0",
                 "1.0.0",
-                false,
+                "",
             )
             .await;
         assert_eq!(manual(got), ("## 2.0.0\nnew stuff".into(), true));
@@ -536,7 +546,10 @@ mod tests {
         let got = client
             .fetch(&repo(), "1.0.0", "2.0.0", |stage| stages.push(stage))
             .await;
-        let Changelog::File { filename, section } = got else {
+        let Changelog::File {
+            filename, section, ..
+        } = got
+        else {
             panic!("not a file: {got:?}");
         };
         assert_eq!(filename, "CHANGELOG.md");
@@ -630,7 +643,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_version_parts_shortens_versions() {
+    async fn fetch_version_format_rewrites_versions() {
         let (server, client) = setup().await;
         Mock::given(path("/changelog"))
             .respond_with(
@@ -640,8 +653,8 @@ mod tests {
             .await;
         let source = Source {
             manual_url: format!("{}/changelog", server.uri()),
-            lax_headings: true,
-            version_parts: 2,
+            heading: "v{version}".into(),
+            version_format: "{major.minor}".into(),
             ..Default::default()
         };
         let got = client.fetch(&source, "2.7.3.0", "2.8.1.0", |_| {}).await;
