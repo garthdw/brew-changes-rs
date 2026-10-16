@@ -42,7 +42,7 @@ impl Client {
         prereleases_only: bool,
     ) -> Result<Vec<Release>> {
         let url = self.repo_url(owner, repo, "releases?per_page=100");
-        let (filtered, saw_any) = self
+        let walk = self
             .fetch_pages(
                 url,
                 |release: Release| release,
@@ -51,7 +51,7 @@ impl Client {
                 prereleases_only,
             )
             .await?;
-        if !saw_any {
+        if !walk.saw_any {
             let url = self.repo_url(owner, repo, "tags?per_page=100");
             let to_release = |tag: Tag| Release {
                 tag_name: tag.name,
@@ -60,11 +60,19 @@ impl Client {
             return Ok(self
                 .fetch_pages(url, to_release, installed, target, prereleases_only)
                 .await?
-                .0);
+                .releases);
         }
-        Ok(self
-            .find_target_if_missing(owner, repo, filtered, target, prereleases_only)
-            .await)
+        let found = self
+            .find_target_if_missing(owner, repo, walk.releases, target, prereleases_only)
+            .await;
+        // Without the installed or target tag the releases belong to another
+        // version line, like opencode's v1 releases for its tag-only v2.
+        let unrelated = !installed.is_empty()
+            && !walk.reached_installed
+            && !found
+                .iter()
+                .any(|release| matches_tag(&release.tag_name, target));
+        Ok(if unrelated { Vec::new() } else { found })
     }
 
     /// A just-published release can be missing from the list (its search index
@@ -111,7 +119,6 @@ impl Client {
         filtered
     }
 
-    /// The bool reports whether the endpoint returned any entries at all.
     async fn fetch_pages<T: DeserializeOwned>(
         &self,
         url: String,
@@ -119,7 +126,7 @@ impl Client {
         installed: &str,
         target: &str,
         prereleases_only: bool,
-    ) -> Result<(Vec<Release>, bool)> {
+    ) -> Result<Walk> {
         let pages = if target.is_empty() {
             MAX_RELEASE_PAGES
         } else {
@@ -137,16 +144,32 @@ impl Client {
                 if prereleases_only && !release.prerelease {
                     continue;
                 }
+                let reached_installed = matches_tag(&release.tag_name, installed);
                 if accumulate(&mut filtered, release, installed, target) {
-                    return Ok((filtered, saw_any));
+                    return Ok(Walk {
+                        releases: filtered,
+                        saw_any,
+                        reached_installed,
+                    });
                 }
             }
         }
         if !target.is_empty() {
             filtered.truncate(RELEASE_CAP);
         }
-        Ok((filtered, saw_any))
+        Ok(Walk {
+            releases: filtered,
+            saw_any,
+            reached_installed: false,
+        })
     }
+}
+
+struct Walk {
+    releases: Vec<Release>,
+    /// Whether the endpoint returned any entries at all.
+    saw_any: bool,
+    reached_installed: bool,
 }
 
 /// Returns whether to stop. With an installed version set, a target match
@@ -324,6 +347,40 @@ mod tests {
         assert_eq!(server.received_requests().await.unwrap().len(), 4);
         assert_eq!(got.len(), 20);
         assert_eq!(got[0].tag_name, "v100.0.0");
+    }
+
+    #[tokio::test]
+    async fn unrelated_releases_dropped_when_neither_installed_nor_target_found() {
+        let (server, client) = setup().await;
+        serve(&server, "/repos/o/r/releases/latest", tag("v1.19.3")).await;
+        serve(
+            &server,
+            "/repos/o/r/releases",
+            [tag("v1.19.3"), tag("v1.19.2")],
+        )
+        .await;
+        let got = client
+            .fetch_releases("o", "r", "2.0.30", "2.0.31", false)
+            .await
+            .unwrap();
+        assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn partial_kept_when_installed_reached() {
+        let (server, client) = setup().await;
+        serve(&server, "/repos/o/r/releases/latest", tag("v2.0.32")).await;
+        serve(
+            &server,
+            "/repos/o/r/releases",
+            [tag("v2.0.32"), tag("v2.0.30")],
+        )
+        .await;
+        let got = client
+            .fetch_releases("o", "r", "2.0.30", "2.0.31", false)
+            .await
+            .unwrap();
+        assert_eq!(tags(&got), ["v2.0.32"]);
     }
 
     #[tokio::test]

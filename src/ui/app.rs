@@ -412,6 +412,13 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
             }
             text
         }
+        Changelog::Releases {
+            fallback_file: Some(filename),
+            result: Ok(_),
+        } => format!(
+            "{filename} doesn't document {}, and no GitHub release matches it.",
+            item.current
+        ),
         Changelog::Releases { result: Ok(_), .. } if item.source.prereleases_only => {
             "No GitHub pre-releases found for this package.".into()
         }
@@ -833,6 +840,14 @@ mod tests {
         assert_eq!(
             changelog_body(&pre, &empty),
             "No GitHub pre-releases found for this package."
+        );
+        let undocumented = Changelog::Releases {
+            fallback_file: Some("CHANGELOG.md".into()),
+            result: Ok(Releases::default()),
+        };
+        assert_eq!(
+            changelog_body(&items(1)[0], &undocumented),
+            "CHANGELOG.md doesn't document 2.0, and no GitHub release matches it."
         );
         let failed = Changelog::Releases {
             fallback_file: None,
