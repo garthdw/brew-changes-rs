@@ -1,6 +1,12 @@
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::sync::LazyLock;
+
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{FontStyle, ThemeSet};
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::view::{bold, dim};
@@ -12,6 +18,7 @@ struct Palette {
     code_block: Style,
     link: Style,
     dim: Style,
+    syntax_theme: &'static str,
 }
 
 impl Palette {
@@ -37,6 +44,11 @@ impl Palette {
                 .fg(Color::Indexed(link))
                 .add_modifier(Modifier::UNDERLINED),
             dim: dim(),
+            syntax_theme: if dark {
+                "base16-ocean.dark"
+            } else {
+                "InspiredGitHub"
+            },
         }
     }
 }
@@ -80,6 +92,7 @@ struct Renderer {
     need_gap: bool,
     links: Vec<(String, usize)>,
     code_block: Option<String>,
+    code_language: Option<String>,
     table: Option<Table>,
 }
 
@@ -96,6 +109,7 @@ impl Renderer {
             need_gap: false,
             links: vec![],
             code_block: None,
+            code_language: None,
             table: None,
         }
     }
@@ -177,9 +191,15 @@ impl Renderer {
                 self.start_block();
                 self.containers.push(Container::Quote);
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 self.start_block();
                 self.code_block = Some(String::new());
+                self.code_language = match kind {
+                    CodeBlockKind::Fenced(info) => {
+                        info.split_whitespace().next().map(str::to_string)
+                    }
+                    CodeBlockKind::Indented => None,
+                };
             }
             Tag::List(start) => {
                 // A nested list continues its parent item without a gap.
@@ -323,13 +343,21 @@ impl Renderer {
 
     fn code_block_end(&mut self) {
         let code = self.code_block.take().unwrap_or_default();
+        let code = code.trim_end_matches('\n').replace('\t', "    ");
+        let language = self.code_language.take();
+        let source_lines = language
+            .and_then(|language| highlight(&code, &language, self.palette.syntax_theme))
+            .unwrap_or_else(|| {
+                code.split('\n')
+                    .map(|line| vec![Span::styled(line.to_string(), self.palette.code_block)])
+                    .collect()
+            });
         let available = self.width.saturating_sub(self.prefix_width() + 2).max(1);
-        for line in code.trim_end_matches('\n').split('\n') {
-            let line = line.replace('\t', "    ");
-            for chunk in split_by_width(&line, available) {
+        for source_line in source_lines {
+            for chunk in split_spans_by_width(source_line, available) {
                 let mut spans = self.prefix(false);
                 spans.push(Span::raw("  "));
-                spans.push(Span::styled(chunk, self.palette.code_block));
+                spans.extend(chunk);
                 self.lines.push(Line::from(spans));
             }
         }
@@ -526,6 +554,74 @@ fn split_by_width(text: &str, width: usize) -> Vec<String> {
     chunks
 }
 
+// Loaded on first use so the list still appears instantly at startup.
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static THEMES: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
+/// None for an unknown language or a highlighting failure, so the caller
+/// falls back to plain code styling.
+fn highlight(code: &str, language: &str, theme_name: &str) -> Option<Vec<Vec<Span<'static>>>> {
+    let syntax = SYNTAXES.find_syntax_by_token(language)?;
+    let theme = THEMES.themes.get(theme_name)?;
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    LinesWithEndings::from(code)
+        .map(|line| {
+            let regions = highlighter.highlight_line(line, &SYNTAXES).ok()?;
+            Some(
+                regions
+                    .into_iter()
+                    .map(|(style, text)| {
+                        // The theme's background is ignored so blocks sit on the
+                        // terminal's own background.
+                        let foreground = style.foreground;
+                        let mut span_style =
+                            Style::new().fg(Color::Rgb(foreground.r, foreground.g, foreground.b));
+                        if style.font_style.contains(FontStyle::BOLD) {
+                            span_style = span_style.add_modifier(Modifier::BOLD);
+                        }
+                        if style.font_style.contains(FontStyle::ITALIC) {
+                            span_style = span_style.add_modifier(Modifier::ITALIC);
+                        }
+                        if style.font_style.contains(FontStyle::UNDERLINE) {
+                            span_style = span_style.add_modifier(Modifier::UNDERLINED);
+                        }
+                        Span::styled(text.trim_end_matches('\n').to_string(), span_style)
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Hard-wraps one line of styled spans, keeping each piece's style.
+fn split_spans_by_width(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    let mut lines = vec![vec![]];
+    let mut line_width = 0;
+    for span in spans {
+        let mut piece = String::new();
+        for character in span.content.chars() {
+            let character_width = character.width().unwrap_or(0);
+            if line_width + character_width > width && line_width > 0 {
+                if let Some(line) = lines.last_mut()
+                    && !piece.is_empty()
+                {
+                    line.push(Span::styled(std::mem::take(&mut piece), span.style));
+                }
+                lines.push(vec![]);
+                line_width = 0;
+            }
+            piece.push(character);
+            line_width += character_width;
+        }
+        if let Some(line) = lines.last_mut()
+            && !piece.is_empty()
+        {
+            line.push(Span::styled(piece, span.style));
+        }
+    }
+    lines
+}
+
 fn truncate(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
@@ -599,6 +695,60 @@ mod tests {
         assert_eq!(
             text("Run `x`:\n\n```\nfoo\n  bar\n```", 40),
             ["Run x:", "", "  foo", "    bar"]
+        );
+    }
+
+    #[test]
+    fn known_language_is_highlighted() {
+        let lines = render("```rust\nfn main() {}\n```", 40, true);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>(),
+            ["  fn main() {}"]
+        );
+        let colors: std::collections::HashSet<_> = lines[0]
+            .spans
+            .iter()
+            .skip(1)
+            .map(|span| span.style.fg)
+            .collect();
+        assert!(
+            colors.len() > 1,
+            "expected several token colours, got {colors:?}"
+        );
+        assert!(
+            colors
+                .iter()
+                .all(|color| matches!(color, Some(Color::Rgb(..))))
+        );
+    }
+
+    #[test]
+    fn unknown_or_missing_language_stays_plain() {
+        for markdown in ["```nosuchlang\nx = 1\n```", "```\nx = 1\n```", "    x = 1"] {
+            let lines = render(markdown, 40, true);
+            assert_eq!(lines[0].to_string(), "  x = 1", "{markdown:?}");
+            assert_eq!(
+                lines[0].spans[1].style,
+                Palette::new(true).code_block,
+                "{markdown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn highlighted_lines_wrap_and_keep_styles() {
+        let lines = render("```sh\necho aaaaaaaaaaaaaaaa\n```", 14, false);
+        let text: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        assert_eq!(text, ["  echo aaaaaaa", "  aaaaaaaaa"]);
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .skip(1)
+                .all(|span| matches!(span.style.fg, Some(Color::Rgb(..))))
         );
     }
 
