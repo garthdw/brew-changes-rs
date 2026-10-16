@@ -1,0 +1,50 @@
+version: 2
+
+builds:
+  - id: brew-changes
+    builder: rust
+    binary: brew-changes
+    command: zigbuild
+    flags:
+      - --release
+      - --bin=brew-changes
+    targets:
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+
+archives:
+  - id: brew-changes
+    formats: [tar.gz]
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+brews:
+  - name: brew-changes
+    repository:
+      owner: garthdw
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/garthdw/brew-changes"
+    description: "Interactive changelog viewer for outdated Homebrew packages"
+    license: "MIT"
+    commit_author:
+      name: Garth de Wet
+      email: garth@dewet.dev
+    install: |
+      bin.install "brew-changes"
+    test: |
+      assert_match "Checking for outdated packages", shell_output("#{bin}/brew-changes 2>&1", 0..1)
