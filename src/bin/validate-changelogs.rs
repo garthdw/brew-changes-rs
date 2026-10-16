@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use brew_changes::github::{Client, HtmlWithoutVersion, Origin, resolve_source};
+use brew_changes::github::{Changelog, Client, Releases, resolve_source};
 use brew_changes::homebrew::{self, Info, Package, brew_info_runner};
 use futures::StreamExt;
 use serde::Deserialize;
@@ -180,59 +180,67 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
     let mut outcome = Outcome {
         name: package.name.clone(),
         repo: format!("{}/{}", source.owner, source.repo),
-        found: changelog.found,
         ..Default::default()
     };
-    match changelog.origin {
-        Origin::None => {
+    let manual = &source.manual_url;
+    match changelog {
+        Changelog::NoSource => {
             outcome.source = "no-repo".into();
             outcome.note = format!("homepage={} url={}", info.homepage, info.url);
         }
-        Origin::Manual => {
+        Changelog::ManualHtmlWithoutVersion => {
             outcome.source = "manual".into();
-            outcome.manual = changelog.found;
-            outcome.note = match &changelog.error {
-                Some(error) if error.is::<HtmlWithoutVersion>() => {
-                    format!("link only (HTML lacks version): {}", source.manual_url)
-                }
-                Some(error) => format!("fetch error: {error:#}"),
-                None if !changelog.found => {
-                    format!("version heading not located: {}", source.manual_url)
-                }
-                None => format!(
-                    "{} bytes from {}",
-                    changelog.section.len(),
-                    source.manual_url
-                ),
+            outcome.note = format!("link only (HTML lacks version): {manual}");
+        }
+        Changelog::ManualFailed(error) => {
+            outcome.source = "manual".into();
+            outcome.note = format!("fetch error: {error:#}");
+        }
+        Changelog::Manual { section, found } => {
+            outcome.source = "manual".into();
+            outcome.found = found;
+            outcome.manual = found;
+            outcome.note = if found {
+                format!("{} bytes from {manual}", section.len())
+            } else {
+                format!("version heading not located: {manual}")
             };
         }
-        Origin::File => {
-            outcome.source = format!("file:{}", changelog.filename.as_deref().unwrap_or_default());
-            outcome.note = format!("{} bytes", changelog.section.len());
+        Changelog::File { filename, section } => {
+            outcome.found = true;
+            outcome.source = format!("file:{filename}");
+            outcome.note = format!("{} bytes", section.len());
         }
-        Origin::Releases => {
+        Changelog::Releases {
+            fallback_file,
+            result,
+        } => {
             outcome.source = "releases".into();
-            let releases = &changelog.releases;
-            outcome.note = match (&changelog.error, releases.first(), releases.last()) {
-                (Some(error), ..) => format!("fetch error: {error:#}"),
-                (None, None, _) => "no releases found".into(),
-                (None, Some(newest), Some(oldest)) if changelog.found => format!(
-                    "{} releases, {}..{}",
-                    releases.len(),
-                    oldest.tag_name,
-                    newest.tag_name
-                ),
-                (None, Some(newest), _) => {
-                    outcome.partial = true;
-                    format!(
-                        "tag for {} not found; showing {} most recent releases (latest={})",
-                        package.current,
-                        releases.len(),
-                        newest.tag_name
-                    )
-                }
+            outcome.note = match result {
+                Err(error) => format!("fetch error: {error:#}"),
+                Ok(Releases { list, found }) => match (list.first(), list.last()) {
+                    (None, _) => "no releases found".into(),
+                    (Some(newest), Some(oldest)) if found => {
+                        outcome.found = true;
+                        format!(
+                            "{} releases, {}..{}",
+                            list.len(),
+                            oldest.tag_name,
+                            newest.tag_name
+                        )
+                    }
+                    (Some(newest), _) => {
+                        outcome.partial = true;
+                        format!(
+                            "tag for {} not found; showing {} most recent releases (latest={})",
+                            package.current,
+                            list.len(),
+                            newest.tag_name
+                        )
+                    }
+                },
             };
-            if let Some(filename) = &changelog.filename {
+            if let Some(filename) = fallback_file {
                 outcome.note = format!("fell back from {filename}; {}", outcome.note);
             }
         }

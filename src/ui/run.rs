@@ -101,7 +101,7 @@ fn spawn_effect(effect: Effect, app: &App, client: &Client, sender: &UnboundedSe
                         Message::Fetched {
                             index,
                             body,
-                            filename: changelog.filename,
+                            filename: changelog.into_filename(),
                         },
                     );
                 }

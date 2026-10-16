@@ -3,6 +3,8 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
+use std::ops::Range;
+
 use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Item, Upgrade};
@@ -41,39 +43,49 @@ pub fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
 }
 
-fn spinner(app: &App) -> Span<'static> {
-    Span::styled(SPINNER[app.spinner % SPINNER.len()], dim())
+fn spinner(tick: usize) -> Span<'static> {
+    Span::styled(SPINNER[tick % SPINNER.len()], dim())
 }
 
-/// Also returns each item's header line offset, for scrolling it into view.
-pub fn list_lines<'a>(
-    app: &App,
-    body_for: impl Fn(usize) -> Option<&'a [Line<'static>]>,
-) -> (Vec<Line<'static>>, Vec<usize>) {
+/// Lines `range` of the item list, building only the rows that fall in it.
+pub fn lines_in(app: &App, range: Range<usize>) -> Vec<Line<'static>> {
     let mut lines = vec![];
-    let mut item_lines = Vec::with_capacity(app.items.len());
-    for (index, item) in app.items.iter().enumerate() {
-        item_lines.push(lines.len());
-        lines.push(row(app, index, item));
-        if !item.expanded {
-            continue;
+    for ((index, item), &start) in app.items.iter().enumerate().zip(&app.item_lines) {
+        if start >= range.end {
+            break;
         }
-        let mut content: Vec<Line<'static>> =
-            body_for(index).map(<[_]>::to_vec).unwrap_or_default();
-        if let Some(stage) = &item.loading_stage {
-            let text = match stage {
-                Stage::Changelog => " checking changelog...".to_string(),
-                Stage::File(filename) => format!(" checking {filename}..."),
-                Stage::Releases => " fetching releases...".to_string(),
-            };
-            content.push(Line::from(vec![spinner(app), Span::raw(text)]));
+        if range.contains(&start) {
+            lines.push(row(app, index, item));
         }
-        if content.is_empty() {
-            content.push(Line::styled("(empty)", dim()));
-        }
-        lines.extend(frame(content));
+        let body_start = start + 1;
+        lines.extend(
+            app.body_lines(index)
+                .iter()
+                .skip(range.start.saturating_sub(body_start))
+                .take(range.end.saturating_sub(body_start.max(range.start)))
+                .cloned(),
+        );
     }
-    (lines, item_lines)
+    lines
+}
+
+pub fn frame_body(
+    mut content: Vec<Line<'static>>,
+    loading: Option<&Stage>,
+    tick: usize,
+) -> Vec<Line<'static>> {
+    if let Some(stage) = loading {
+        let text = match stage {
+            Stage::Changelog => " checking changelog...".to_string(),
+            Stage::File(filename) => format!(" checking {filename}..."),
+            Stage::Releases => " fetching releases...".to_string(),
+        };
+        content.push(Line::from(vec![spinner(tick), Span::raw(text)]));
+    }
+    if content.is_empty() {
+        content.push(Line::styled("(empty)", dim()));
+    }
+    frame(content)
 }
 
 fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
@@ -114,7 +126,11 @@ fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
     match item.upgrade {
         Upgrade::Idle => {}
         Upgrade::Running => {
-            spans.extend([Span::raw("  "), spinner(app), Span::raw(" upgrading...")]);
+            spans.extend([
+                Span::raw("  "),
+                spinner(app.spinner),
+                Span::raw(" upgrading..."),
+            ]);
         }
         Upgrade::Done => spans.extend([Span::raw("  "), Span::styled("[upgraded]", dim())]),
         Upgrade::Failed(_) => spans.extend([
@@ -217,8 +233,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Paragraph::new(Line::styled("Outdated packages:", bold())),
         header,
     );
-    let end = (app.offset + app.height as usize).min(app.lines.len());
-    let visible = app.lines.get(app.offset..end).unwrap_or_default().to_vec();
+    let visible = lines_in(app, app.offset..app.offset + app.height as usize);
     frame.render_widget(Paragraph::new(visible), body);
     let footer_line = match &app.notice {
         Some(notice) => Line::styled(notice.clone(), Style::new().fg(ERROR)),
@@ -319,7 +334,10 @@ mod tests {
     }
 
     fn text(app: &App) -> Vec<String> {
-        app.lines.iter().map(|line| line.to_string()).collect()
+        lines_in(app, 0..app.line_count)
+            .iter()
+            .map(|line| line.to_string())
+            .collect()
     }
 
     fn repo_source() -> Source {
@@ -362,6 +380,27 @@ mod tests {
     }
 
     #[test]
+    fn lines_in_matches_slice_of_all_lines() {
+        let expanded = |name| Item {
+            expanded: true,
+            body: Some("one\n\ntwo\n\nthree".into()),
+            ..item(name)
+        };
+        let app = app(vec![expanded("a"), item("b"), expanded("c")], 80);
+        let all = text(&app);
+        assert_eq!(all.len(), app.line_count);
+        for start in 0..all.len() {
+            for end in start..=all.len() + 2 {
+                let window: Vec<String> = lines_in(&app, start..end)
+                    .iter()
+                    .map(|line| line.to_string())
+                    .collect();
+                assert_eq!(window, all[start..end.min(all.len())], "{start}..{end}");
+            }
+        }
+    }
+
+    #[test]
     fn status_tags() {
         let upgraded = Item {
             upgrade: Upgrade::Done,
@@ -389,7 +428,7 @@ mod tests {
     #[test]
     fn selected_row_is_bold_only_when_collapsed_and_not_upgraded() {
         let is_bold = |app: &App| {
-            app.lines[0].spans[1]
+            lines_in(app, 0..1)[0].spans[1]
                 .style
                 .add_modifier
                 .contains(Modifier::BOLD)

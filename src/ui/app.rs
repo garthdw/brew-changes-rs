@@ -4,7 +4,7 @@ use ratatui::text::Line;
 
 use super::keys::{Action, Keymap};
 use super::{markdown, view};
-use crate::github::{Changelog, HtmlWithoutVersion, Origin, Source, Stage};
+use crate::github::{Changelog, Releases, Source, Stage};
 
 const HEADER_LINES: u16 = 2;
 const FOOTER_LINES: u16 = 2;
@@ -116,12 +116,21 @@ pub struct App {
     pub height: u16,
     pub offset: usize,
     pub spinner: usize,
-    pub lines: Vec<Line<'static>>,
-    /// Line offset of each item's header within `lines`.
+    pub line_count: usize,
+    /// Line offset of each item's header.
     pub item_lines: Vec<usize>,
-    /// Keyed on the Markdown source and wrap width so navigation doesn't
-    /// re-render large bodies.
-    body_cache: HashMap<usize, (String, usize, Vec<Line<'static>>)>,
+    /// Collapsed bodies stay cached so re-expanding doesn't re-render.
+    body_cache: HashMap<usize, Body>,
+}
+
+/// Lines are only rebuilt when their inputs change, since bodies can run to
+/// thousands of lines and `refresh` runs on every tick while busy.
+#[derive(Default)]
+struct Body {
+    source: String,
+    wrap: usize,
+    framed: Vec<Line<'static>>,
+    loading: bool,
 }
 
 impl App {
@@ -138,7 +147,7 @@ impl App {
             height: 1,
             offset: 0,
             spinner: 0,
-            lines: vec![],
+            line_count: 0,
             item_lines: vec![],
             body_cache: HashMap::new(),
         }
@@ -276,12 +285,11 @@ impl App {
             .cursor
             .saturating_add_signed(delta)
             .min(self.items.len() - 1);
-        self.refresh();
         self.scroll_to_cursor();
     }
 
     fn max_offset(&self) -> usize {
-        self.lines.len().saturating_sub(self.height as usize)
+        self.line_count.saturating_sub(self.height as usize)
     }
 
     pub fn scroll_to_cursor(&mut self) {
@@ -301,30 +309,43 @@ impl App {
         let wrap = (self.width as usize)
             .saturating_sub(FRAME_CHROME)
             .min(MAX_BODY_WIDTH);
+        self.item_lines.clear();
+        let mut line = 0;
         for (index, item) in self.items.iter().enumerate() {
-            // Collapsed bodies stay cached so re-expanding doesn't re-render.
-            let Some(source) = body_markdown(item) else {
+            self.item_lines.push(line);
+            line += 1;
+            if !item.expanded {
                 continue;
-            };
-            let cached =
-                self.body_cache
-                    .get(&index)
-                    .is_some_and(|(cached_source, cached_wrap, _)| {
-                        *cached_source == source && *cached_wrap == wrap
-                    });
-            if !cached {
-                let lines = markdown::render(&source, wrap, self.dark);
-                self.body_cache.insert(index, (source, wrap, lines));
             }
+            let source = body_markdown(item).unwrap_or_default();
+            let loading = item.loading_stage.as_ref();
+            let body = self.body_cache.entry(index).or_default();
+            // `framed` is never empty once built, as it includes the border.
+            // While loading the body is at most an upgrade failure, so
+            // re-rendering it for each spinner frame is cheap.
+            if body.framed.is_empty()
+                || body.source != source
+                || body.wrap != wrap
+                || body.loading
+                || loading.is_some()
+            {
+                let rendered = markdown::render(&source, wrap, self.dark);
+                body.framed = view::frame_body(rendered, loading, self.spinner);
+                body.source = source;
+                body.wrap = wrap;
+                body.loading = loading.is_some();
+            }
+            line += body.framed.len();
         }
-        let (lines, item_lines) = view::list_lines(self, |index| {
-            self.body_cache
-                .get(&index)
-                .map(|(_, _, lines)| lines.as_slice())
-        });
-        self.lines = lines;
-        self.item_lines = item_lines;
+        self.line_count = line;
         self.offset = self.offset.min(self.max_offset());
+    }
+
+    pub fn body_lines(&self, index: usize) -> &[Line<'static>] {
+        match (self.items.get(index), self.body_cache.get(&index)) {
+            (Some(item), Some(body)) if item.expanded => &body.framed,
+            _ => &[],
+        }
     }
 }
 
@@ -350,35 +371,25 @@ fn body_markdown(item: &Item) -> Option<String> {
 /// PRD FR-10.2.
 pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
     let manual = &item.source.manual_url;
-    match changelog.origin {
-        Origin::None => {
+    match changelog {
+        Changelog::NoSource => {
             "No GitHub repository could be resolved for this package; changelog unavailable.".into()
         }
-        Origin::Manual => match &changelog.error {
-            Some(error) if error.is::<HtmlWithoutVersion>() => format!(
-                "The configured changelog is an HTML page that doesn't appear to document {}.\n\nKnown changelog: {manual}",
-                item.current
-            ),
-            Some(_) => format!(
-                "Could not fetch the configured changelog URL.\n\nKnown changelog: {manual}"
-            ),
-            None => format!("(from {manual})\n\n{}", changelog.section),
-        },
-        Origin::File => format!(
-            "(from {})\n\n{}",
-            changelog.filename.as_deref().unwrap_or_default(),
-            changelog.section
+        Changelog::ManualHtmlWithoutVersion => format!(
+            "The configured changelog is an HTML page that doesn't appear to document {}.\n\nKnown changelog: {manual}",
+            item.current
         ),
-        Origin::Releases if changelog.releases.is_empty() => {
-            if item.source.prereleases_only && changelog.error.is_none() {
-                "No GitHub pre-releases found for this package.".into()
-            } else {
-                "No changelog file or GitHub releases found for this package.".into()
-            }
+        Changelog::ManualFailed(_) => {
+            format!("Could not fetch the configured changelog URL.\n\nKnown changelog: {manual}")
         }
-        Origin::Releases => {
+        Changelog::Manual { section, .. } => format!("(from {manual})\n\n{section}"),
+        Changelog::File { filename, section } => format!("(from {filename})\n\n{section}"),
+        Changelog::Releases {
+            result: Ok(Releases { list, .. }),
+            ..
+        } if !list.is_empty() => {
             let mut text = String::from("(from GitHub releases)\n\n");
-            for release in changelog.releases.iter().take(MAX_DISPLAYED_RELEASES) {
+            for release in list.iter().take(MAX_DISPLAYED_RELEASES) {
                 let date = if release.published_at.is_empty() {
                     "unknown date"
                 } else {
@@ -392,6 +403,12 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
                 text += &format!("### {} ({date})\n\n{body}\n\n", release.tag_name);
             }
             text
+        }
+        Changelog::Releases { result: Ok(_), .. } if item.source.prereleases_only => {
+            "No GitHub pre-releases found for this package.".into()
+        }
+        Changelog::Releases { .. } => {
+            "No changelog file or GitHub releases found for this package.".into()
         }
     }
 }
@@ -426,7 +443,7 @@ mod tests {
     }
 
     fn line_text(app: &App) -> String {
-        app.lines
+        view::lines_in(app, 0..app.line_count)
             .iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -529,6 +546,22 @@ mod tests {
             stage: Stage::Releases,
         });
         assert!(line_text(&app).contains("fetching releases..."));
+    }
+
+    #[test]
+    fn loading_spinner_ticks_then_clears() {
+        let mut app = ready(items(1));
+        key(&mut app, "enter");
+        let before = line_text(&app);
+        app.update(Message::Tick);
+        assert_ne!(line_text(&app), before);
+        app.update(Message::Fetched {
+            index: 0,
+            body: String::new(),
+            filename: None,
+        });
+        let text = line_text(&app);
+        assert!(!text.contains("checking") && text.contains("(empty)"));
     }
 
     #[test]
@@ -664,7 +697,7 @@ mod tests {
     fn scroll_to_cursor_both_directions() {
         let mut app = ready(items(20));
         app.height = 5;
-        app.lines = vec![Line::raw(""); 100];
+        app.line_count = 100;
         app.item_lines = (0..20).map(|i| i * 3).collect();
         app.cursor = 19;
         app.scroll_to_cursor();
@@ -712,56 +745,45 @@ mod tests {
 
     #[test]
     fn body_texts() {
-        let none = changelog_body(&Item::default(), &Changelog::default());
+        let none = changelog_body(&Item::default(), &Changelog::NoSource);
         assert_eq!(
             none,
             "No GitHub repository could be resolved for this package; changelog unavailable."
         );
 
-        let err = Changelog {
-            origin: Origin::Manual,
-            error: Some(anyhow::anyhow!("boom")),
-            ..Default::default()
-        };
+        let err = Changelog::ManualFailed(anyhow::anyhow!("boom"));
         assert_eq!(
             changelog_body(&manual("https://m"), &err),
             "Could not fetch the configured changelog URL.\n\nKnown changelog: https://m"
         );
 
-        let html = Changelog {
-            origin: Origin::Manual,
-            error: Some(HtmlWithoutVersion.into()),
-            ..Default::default()
-        };
+        let html = Changelog::ManualHtmlWithoutVersion;
         let body = changelog_body(&manual("https://m"), &html);
         assert!(body.starts_with(
             "The configured changelog is an HTML page that doesn't appear to document 1.2.3."
         ));
 
-        let ok = Changelog {
-            origin: Origin::Manual,
+        let ok = Changelog::Manual {
             section: "## 1.2.3".into(),
-            ..Default::default()
+            found: true,
         };
         assert_eq!(
             changelog_body(&manual("https://m"), &ok),
             "(from https://m)\n\n## 1.2.3"
         );
 
-        let file = Changelog {
-            origin: Origin::File,
-            filename: Some("NEWS.md".into()),
+        let file = Changelog::File {
+            filename: "NEWS.md".into(),
             section: "x".into(),
-            ..Default::default()
         };
         assert_eq!(
             changelog_body(&Item::default(), &file),
             "(from NEWS.md)\n\nx"
         );
 
-        let empty = Changelog {
-            origin: Origin::Releases,
-            ..Default::default()
+        let empty = Changelog::Releases {
+            fallback_file: None,
+            result: Ok(Releases::default()),
         };
         assert_eq!(
             changelog_body(&Item::default(), &empty),
@@ -778,11 +800,19 @@ mod tests {
             changelog_body(&pre, &empty),
             "No GitHub pre-releases found for this package."
         );
+        let failed = Changelog::Releases {
+            fallback_file: None,
+            result: Err(anyhow::anyhow!("boom")),
+        };
+        assert_eq!(
+            changelog_body(&pre, &failed),
+            "No changelog file or GitHub releases found for this package."
+        );
     }
 
     #[test]
     fn release_body_caps_at_ten() {
-        let releases = (0..12)
+        let list = (0..12)
             .map(|i| Release {
                 tag_name: format!("v{i}"),
                 ..Default::default()
@@ -794,10 +824,9 @@ mod tests {
                 ..Default::default()
             }])
             .collect();
-        let changelog = Changelog {
-            origin: Origin::Releases,
-            releases,
-            ..Default::default()
+        let changelog = Changelog::Releases {
+            fallback_file: None,
+            result: Ok(Releases { list, found: true }),
         };
         let body = changelog_body(&Item::default(), &changelog);
         assert!(body.starts_with(

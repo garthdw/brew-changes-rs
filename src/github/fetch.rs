@@ -10,39 +10,45 @@ use crate::version::{matches_tag, shorten};
 const BASE_NAMES: [&str; 4] = ["CHANGELOG", "CHANGES", "HISTORY", "NEWS"];
 const EXTENSIONS: [&str; 3] = [".md", ".rst", ""];
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    #[default]
-    None,
-    Manual,
-    File,
-    Releases,
+#[derive(Debug)]
+pub enum Changelog {
+    NoSource,
+    /// When the version heading isn't located, `section` is the opening lines.
+    Manual {
+        section: String,
+        found: bool,
+    },
+    /// Distinct from `ManualFailed` because the opening lines of such a page
+    /// are site navigation, not worth showing as an excerpt.
+    ManualHtmlWithoutVersion,
+    ManualFailed(anyhow::Error),
+    File {
+        filename: String,
+        section: String,
+    },
+    Releases {
+        /// The changelog file that didn't document the version, so the UI can
+        /// still link to it.
+        fallback_file: Option<String>,
+        result: Result<Releases>,
+    },
 }
 
 #[derive(Debug, Default)]
-pub struct Changelog {
-    pub origin: Origin,
-    /// Set even when releases were used because the file didn't document the
-    /// version, so the UI can still link to it.
-    pub filename: Option<String>,
-    pub section: String,
-    pub releases: Vec<Release>,
+pub struct Releases {
+    pub list: Vec<Release>,
     pub found: bool,
-    pub error: Option<anyhow::Error>,
 }
 
-/// Distinct from other fetch errors because the opening lines of such a page
-/// are site navigation, not worth showing as an excerpt.
-#[derive(Debug)]
-pub struct HtmlWithoutVersion;
-
-impl std::fmt::Display for HtmlWithoutVersion {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("changelog is an HTML page that doesn't document this version")
+impl Changelog {
+    pub fn into_filename(self) -> Option<String> {
+        match self {
+            Self::File { filename, .. } => Some(filename),
+            Self::Releases { fallback_file, .. } => fallback_file,
+            _ => None,
+        }
     }
 }
-
-impl std::error::Error for HtmlWithoutVersion {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage {
@@ -71,36 +77,20 @@ impl Client {
             (installed.to_string(), current.to_string())
         };
         if !source.manual_url.is_empty() {
-            return match self
+            return self
                 .fetch_manual_section(
                     &source.manual_url,
                     &current,
                     &installed,
                     source.lax_headings,
                 )
-                .await
-            {
-                Ok((section, found)) => Changelog {
-                    origin: Origin::Manual,
-                    section,
-                    found,
-                    ..Default::default()
-                },
-                Err(error) => Changelog {
-                    origin: Origin::Manual,
-                    error: Some(error),
-                    ..Default::default()
-                },
-            };
+                .await;
         }
         if !source.has_repo() {
-            return Changelog::default();
+            return Changelog::NoSource;
         }
 
-        let mut changelog = Changelog {
-            origin: Origin::Releases,
-            ..Default::default()
-        };
+        let mut fallback_file = None;
         // A failed listing is treated as "no file"; releases may still work.
         if let Ok(Some(filename)) = self
             .resolve_changelog_filename(&source.owner, &source.repo)
@@ -113,19 +103,13 @@ impl Client {
                 && let (section, true) =
                     trim_to_range(&content, &current, &installed, source.lax_headings)
             {
-                return Changelog {
-                    origin: Origin::File,
-                    filename: Some(filename),
-                    section,
-                    found: true,
-                    ..changelog
-                };
+                return Changelog::File { filename, section };
             }
-            changelog.filename = Some(filename);
+            fallback_file = Some(filename);
         }
 
         on_stage(Stage::Releases);
-        match self
+        let result = self
             .fetch_releases(
                 &source.owner,
                 &source.repo,
@@ -134,16 +118,16 @@ impl Client {
                 source.prereleases_only,
             )
             .await
-        {
-            Ok(releases) => {
-                changelog.found = releases
+            .map(|list| Releases {
+                found: list
                     .iter()
-                    .any(|release| matches_tag(&release.tag_name, &current));
-                changelog.releases = releases;
-            }
-            Err(error) => changelog.error = Some(error),
+                    .any(|release| matches_tag(&release.tag_name, &current)),
+                list,
+            });
+        Changelog::Releases {
+            fallback_file,
+            result,
         }
-        changelog
     }
 
     async fn fetch_manual_section(
@@ -152,20 +136,23 @@ impl Client {
         new_version: &str,
         installed: &str,
         lax: bool,
-    ) -> Result<(String, bool)> {
-        let (content, is_html) = match parse_github_file_url(url) {
-            Some(file) => (
-                self.fetch_github_file(file.owner, file.repo, file.path, Some(file.git_ref))
-                    .await?,
-                false,
-            ),
-            None => self.fetch_raw(url).await?,
+    ) -> Changelog {
+        let fetched = match parse_github_file_url(url) {
+            Some(file) => self
+                .fetch_github_file(file.owner, file.repo, file.path, Some(file.git_ref))
+                .await
+                .map(|content| (content, false)),
+            None => self.fetch_raw(url).await,
+        };
+        let (content, is_html) = match fetched {
+            Ok(fetched) => fetched,
+            Err(error) => return Changelog::ManualFailed(error),
         };
         let (section, found) = trim_to_range(&content, new_version, installed, lax);
         if is_html && !found {
-            return Err(HtmlWithoutVersion.into());
+            return Changelog::ManualHtmlWithoutVersion;
         }
-        Ok((section, found))
+        Changelog::Manual { section, found }
     }
 
     /// One root listing instead of probing each filename, which adds seconds
@@ -273,6 +260,23 @@ mod tests {
         json!([{"commit": {"committer": {"date": date}}}])
     }
 
+    fn manual(changelog: Changelog) -> (String, bool) {
+        match changelog {
+            Changelog::Manual { section, found } => (section, found),
+            other => panic!("not a manual section: {other:?}"),
+        }
+    }
+
+    fn releases(changelog: Changelog) -> (Option<String>, Releases) {
+        match changelog {
+            Changelog::Releases {
+                fallback_file,
+                result: Ok(releases),
+            } => (fallback_file, releases),
+            other => panic!("not releases: {other:?}"),
+        }
+    }
+
     fn repo() -> Source {
         Source {
             owner: "o".into(),
@@ -293,9 +297,8 @@ mod tests {
             .await;
         let got = client
             .fetch_manual_section(&format!("{}/notes", server.uri()), "2.0.0", "1.0.0", false)
-            .await
-            .unwrap();
-        assert_eq!(got, ("## 2.0.0\nnew stuff".into(), true));
+            .await;
+        assert_eq!(manual(got), ("## 2.0.0\nnew stuff".into(), true));
     }
 
     #[tokio::test]
@@ -309,15 +312,19 @@ mod tests {
         let url = format!("{}/notes", server.uri());
         let got = client
             .fetch_manual_section(&url, "2.0.0", "1.0.0", false)
-            .await
-            .unwrap();
-        assert_eq!(got, ("## Version 2.0.0\n\n- new stuff\n".into(), true));
+            .await;
+        assert_eq!(
+            manual(got),
+            ("## Version 2.0.0\n\n- new stuff\n".into(), true)
+        );
 
-        let error = client
+        let got = client
             .fetch_manual_section(&url, "3.0.0", "2.0.0", false)
-            .await
-            .unwrap_err();
-        assert!(error.is::<HtmlWithoutVersion>());
+            .await;
+        assert!(
+            matches!(got, Changelog::ManualHtmlWithoutVersion),
+            "{got:?}"
+        );
     }
 
     #[tokio::test]
@@ -336,9 +343,8 @@ mod tests {
                 "1.0.0",
                 false,
             )
-            .await
-            .unwrap();
-        assert_eq!(got, ("## 2.0.0\nnew stuff".into(), true));
+            .await;
+        assert_eq!(manual(got), ("## 2.0.0\nnew stuff".into(), true));
     }
 
     #[tokio::test]
@@ -495,9 +501,11 @@ mod tests {
         let got = client
             .fetch(&repo(), "1.0.0", "2.0.0", |stage| stages.push(stage))
             .await;
-        assert_eq!(got.origin, Origin::File);
-        assert!(got.found);
-        assert_eq!(got.section, "## 2.0.0\nnotes\n");
+        let Changelog::File { filename, section } = got else {
+            panic!("not a file: {got:?}");
+        };
+        assert_eq!(filename, "CHANGELOG.md");
+        assert_eq!(section, "## 2.0.0\nnotes\n");
         assert_eq!(stages, [Stage::File("CHANGELOG.md".into())]);
     }
 
@@ -509,7 +517,7 @@ mod tests {
         )
         .await;
         let got = client.fetch(&repo(), "1.0.0", "2.0.0", |_| {}).await;
-        assert_eq!(got.origin, Origin::File);
+        assert!(matches!(got, Changelog::File { .. }), "{got:?}");
     }
 
     #[tokio::test]
@@ -523,10 +531,10 @@ mod tests {
         let got = client
             .fetch(&repo(), "1.0.0", "2.0.0", |stage| stages.push(stage))
             .await;
-        assert_eq!(got.origin, Origin::Releases);
-        assert!(got.found);
-        assert_eq!(got.filename.as_deref(), Some("CHANGELOG.md"));
-        assert_eq!(got.releases.len(), 1);
+        let (fallback_file, releases) = releases(got);
+        assert!(releases.found);
+        assert_eq!(fallback_file.as_deref(), Some("CHANGELOG.md"));
+        assert_eq!(releases.list.len(), 1);
         assert_eq!(
             stages,
             [Stage::File("CHANGELOG.md".into()), Stage::Releases]
@@ -547,9 +555,9 @@ mod tests {
         )
         .await;
         let got = client.fetch(&repo(), "1.0.0", "2.0.0", |_| {}).await;
-        assert_eq!(got.origin, Origin::Releases);
-        assert!(got.found);
-        assert_eq!(got.filename, None);
+        let (fallback_file, releases) = releases(got);
+        assert!(releases.found);
+        assert_eq!(fallback_file, None);
     }
 
     #[tokio::test]
@@ -574,14 +582,16 @@ mod tests {
                 |_| {},
             )
             .await;
+        let (_, releases) = releases(got);
         assert_eq!(
-            got.releases
+            releases
+                .list
                 .iter()
                 .map(|release| release.tag_name.as_str())
                 .collect::<Vec<_>>(),
             ["v2.1.0-pre"]
         );
-        assert!(got.found);
+        assert!(releases.found);
     }
 
     #[tokio::test]
@@ -600,8 +610,7 @@ mod tests {
             ..Default::default()
         };
         let got = client.fetch(&source, "2.7.3.0", "2.8.1.0", |_| {}).await;
-        assert!(got.found);
-        assert_eq!(got.section, "v2.8\nnew stuff");
+        assert_eq!(manual(got), ("v2.8\nnew stuff".into(), true));
     }
 
     #[tokio::test]
@@ -609,6 +618,6 @@ mod tests {
         let got = Client::for_test("http://127.0.0.1:9")
             .fetch(&Source::default(), "1.0.0", "2.0.0", |_| {})
             .await;
-        assert_eq!(got.origin, Origin::None);
+        assert!(matches!(got, Changelog::NoSource), "{got:?}");
     }
 }
