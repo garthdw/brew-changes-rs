@@ -199,6 +199,15 @@ mod tests {
     }
 
     #[test]
+    fn installed_heading_prefers_exact_match_over_patch() {
+        let content = "## 1.8\nnewest\n## 1.7.1\npatch\n## 1.7\nolder\n";
+        assert_eq!(
+            trim_to_range(content, "1.8", "1.7", false),
+            ("## 1.8\nnewest\n## 1.7.1\npatch".into(), true)
+        );
+    }
+
+    #[test]
     fn new_heading_mentions_installed_version() {
         let content = [
             "#### [0.51.0](https://github.com/ast-grep/ast-grep/compare/0.50.0...0.51.0)",

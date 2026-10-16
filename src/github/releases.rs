@@ -151,7 +151,8 @@ impl Client {
 
 /// Returns whether to stop. With an installed version set, a target match
 /// must not stop the walk: releases skipped between installed and target
-/// still belong in the result.
+/// still belong in the result. Releases before the target are newer than
+/// what brew installs, so they're dropped.
 fn accumulate(
     filtered: &mut Vec<Release>,
     release: Release,
@@ -162,6 +163,9 @@ fn accumulate(
         return true;
     }
     let is_target = matches_tag(&release.tag_name, target);
+    if is_target {
+        filtered.clear();
+    }
     filtered.push(release);
     (installed.is_empty() && is_target) || (target.is_empty() && filtered.len() >= RELEASE_CAP)
 }
@@ -252,8 +256,29 @@ mod tests {
             .fetch_releases("o", "r", "", "25.0.0", false)
             .await
             .unwrap();
-        assert_eq!(got.len(), 26);
-        assert_eq!(got.last().unwrap().tag_name, "v25.0.0");
+        assert_eq!(tags(&got), ["v25.0.0"]);
+    }
+
+    #[tokio::test]
+    async fn releases_newer_than_target_are_dropped() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            "/repos/o/r/releases",
+            [
+                tag("v2.2.0"),
+                tag("v2.1.0"),
+                tag("v2.0.0"),
+                tag("v1.5.0"),
+                tag("v1.0.0"),
+            ],
+        )
+        .await;
+        let got = client
+            .fetch_releases("o", "r", "1.0.0", "2.0.0", false)
+            .await
+            .unwrap();
+        assert_eq!(tags(&got), ["v2.0.0", "v1.5.0"]);
     }
 
     #[tokio::test]

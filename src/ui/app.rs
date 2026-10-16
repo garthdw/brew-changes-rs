@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use ratatui::text::Line;
 
 use super::keys::{Action, Keymap};
+use super::markdown::Link;
 use super::{markdown, view};
 use crate::github::{Changelog, Releases, Source, Stage};
 
@@ -13,6 +14,7 @@ const MAX_BODY_WIDTH: usize = 96;
 // Frame margin, border and padding around a body.
 const FRAME_CHROME: usize = 6;
 const UPGRADE_ERROR_LINES: usize = 40;
+const UPGRADE_RUNNING: &str = "An upgrade is still running; wait for it to finish.";
 
 #[derive(Debug, Default, Clone)]
 pub struct Item {
@@ -124,12 +126,13 @@ pub struct App {
 }
 
 /// Lines are only rebuilt when their inputs change, since bodies can run to
-/// thousands of lines and `refresh` runs on every tick while busy.
+/// thousands of lines and `refresh` runs on every tick while busy. Entries are
+/// removed wherever an item's body or upgrade failure changes.
 #[derive(Default)]
 struct Body {
-    source: String,
     wrap: usize,
     framed: Vec<Line<'static>>,
+    links: Vec<Link>,
     loading: bool,
 }
 
@@ -154,9 +157,7 @@ impl App {
     }
 
     pub fn busy(&self) -> bool {
-        self.items
-            .iter()
-            .any(|item| item.loading_stage.is_some() || item.upgrade == Upgrade::Running)
+        self.upgrading() || self.items.iter().any(|item| item.loading_stage.is_some())
     }
 
     pub fn update(&mut self, message: Message) -> Vec<Effect> {
@@ -187,12 +188,14 @@ impl App {
                     item.body = Some(body);
                     item.changelog_filename = filename;
                     item.loading_stage = None;
+                    self.body_cache.remove(&index);
                     self.refresh();
                 }
             }
             Message::UpgradeDone { index, error } => {
                 if let Some(item) = self.items.get_mut(index) {
                     item.upgrade = error.map_or(Upgrade::Done, Upgrade::Failed);
+                    self.body_cache.remove(&index);
                     self.refresh();
                 }
             }
@@ -215,19 +218,21 @@ impl App {
         };
         match action {
             Action::Help => self.show_help = true,
-            Action::Quit => self.outcome = Some(Outcome::Quit),
-            Action::UpgradeAll => {
-                if !self
-                    .items
-                    .iter()
-                    .any(|item| item.upgrade == Upgrade::Running)
-                {
-                    self.outcome = Some(Outcome::UpgradeAll);
-                }
+            // Exiting would orphan the running `brew upgrade` mid-install.
+            Action::Quit | Action::UpgradeAll if self.upgrading() => {
+                self.notice = Some(UPGRADE_RUNNING.into());
             }
+            Action::Quit => self.outcome = Some(Outcome::Quit),
+            Action::UpgradeAll => self.outcome = Some(Outcome::UpgradeAll),
             _ => return self.item_key(action),
         }
         vec![]
+    }
+
+    fn upgrading(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.upgrade == Upgrade::Running)
     }
 
     fn item_key(&mut self, action: Action) -> Vec<Effect> {
@@ -268,6 +273,7 @@ impl App {
                     return vec![];
                 }
                 item.upgrade = Upgrade::Running;
+                self.body_cache.remove(&cursor);
                 self.refresh();
                 self.scroll_to_cursor();
                 return vec![Effect::Upgrade(cursor)];
@@ -317,21 +323,15 @@ impl App {
             if !item.expanded {
                 continue;
             }
-            let source = body_markdown(item).unwrap_or_default();
             let loading = item.loading_stage.as_ref();
             let body = self.body_cache.entry(index).or_default();
             // `framed` is never empty once built, as it includes the border.
             // While loading the body is at most an upgrade failure, so
             // re-rendering it for each spinner frame is cheap.
-            if body.framed.is_empty()
-                || body.source != source
-                || body.wrap != wrap
-                || body.loading
-                || loading.is_some()
-            {
-                let rendered = markdown::render(&source, wrap, self.dark);
-                body.framed = view::frame_body(rendered, loading, self.spinner);
-                body.source = source;
+            if body.framed.is_empty() || body.wrap != wrap || body.loading || loading.is_some() {
+                let source = body_markdown(item).unwrap_or_default();
+                let (lines, links) = markdown::render(&source, wrap, self.dark);
+                (body.framed, body.links) = view::frame_body(lines, links, loading, self.spinner);
                 body.wrap = wrap;
                 body.loading = loading.is_some();
             }
@@ -342,9 +342,17 @@ impl App {
     }
 
     pub fn body_lines(&self, index: usize) -> &[Line<'static>] {
+        self.body(index).map_or(&[], |body| &body.framed)
+    }
+
+    pub fn body_links(&self, index: usize) -> &[Link] {
+        self.body(index).map_or(&[], |body| &body.links)
+    }
+
+    fn body(&self, index: usize) -> Option<&Body> {
         match (self.items.get(index), self.body_cache.get(&index)) {
-            (Some(item), Some(body)) if item.expanded => &body.framed,
-            _ => &[],
+            (Some(item), Some(body)) if item.expanded => Some(body),
+            _ => None,
         }
     }
 }
@@ -652,6 +660,32 @@ mod tests {
         assert_eq!(app.notice.as_deref(), Some("xdg-open: not found"));
         key(&mut app, "down");
         assert_eq!(app.notice, None);
+    }
+
+    #[test]
+    fn quit_is_blocked_while_upgrading() {
+        for k in ["q", "ctrl+c", "a"] {
+            let mut app = ready(items(2));
+            app.items[1].upgrade = Upgrade::Running;
+            key(&mut app, k);
+            assert_eq!(app.outcome, None, "{k}");
+            assert_eq!(app.notice.as_deref(), Some(UPGRADE_RUNNING), "{k}");
+        }
+    }
+
+    #[test]
+    fn retried_upgrade_clears_old_failure_from_body() {
+        let mut app = ready(items(1));
+        app.items[0].body = Some("notes".into());
+        key(&mut app, "enter");
+        key(&mut app, "u");
+        app.update(Message::UpgradeDone {
+            index: 0,
+            error: Some("Error: boom".into()),
+        });
+        assert!(line_text(&app).contains("Error: boom"));
+        key(&mut app, "u");
+        assert!(!line_text(&app).contains("Error: boom"));
     }
 
     #[test]

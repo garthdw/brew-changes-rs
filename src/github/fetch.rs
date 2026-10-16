@@ -194,7 +194,11 @@ impl Client {
         // Ties and unknown dates go to the earlier candidate.
         let mut best: Option<(String, Option<String>)> = None;
         for (name, date) in matches.into_iter().zip(dates) {
-            if best.as_ref().is_none_or(|(_, best_date)| date > *best_date) {
+            let later = |best_date: &Option<String>| match (&date, best_date) {
+                (Some(date), Some(best_date)) => date > best_date,
+                _ => false,
+            };
+            if best.as_ref().is_none_or(|(_, best_date)| later(best_date)) {
                 best = Some((name, date));
             }
         }
@@ -463,6 +467,37 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("NEWS.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn filename_unreadable_date_goes_to_earlier_candidate() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            "/repos/o/r/contents/",
+            listing(&["CHANGELOG.md", "NEWS.md"]),
+        )
+        .await;
+        Mock::given(path("/repos/o/r/commits"))
+            .and(query_param("path", "CHANGELOG.md"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(path("/repos/o/r/commits"))
+            .and(query_param("path", "NEWS.md"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(commit_on("2026-01-01T00:00:00Z")),
+            )
+            .mount(&server)
+            .await;
+        assert_eq!(
+            client
+                .resolve_changelog_filename("o", "r")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("CHANGELOG.md")
         );
     }
 

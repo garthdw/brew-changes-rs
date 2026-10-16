@@ -24,18 +24,20 @@ pub fn in_line(line: &str, version: &str, allow_longer: bool) -> bool {
         })
 }
 
-/// `in_line` arguments, tried in order. The second drops a trailing ".0" from three-plus
-/// part versions because some projects omit it (gcc's "GCC 16.2", git's
-/// "Git v2.56"); it must match exactly so "2.5" (for "2.5.0") doesn't match
-/// "2.5.1".
+/// `in_line` arguments, tried in order. Exact matches come first so "1.7"
+/// stops at "## 1.7", not an earlier "## 1.7.1". The second drops a trailing
+/// ".0" from three-plus part versions because some projects omit it (gcc's
+/// "GCC 16.2", git's "Git v2.56"); it must match exactly so "2.5" (for
+/// "2.5.0") doesn't match "2.5.1".
 pub fn line_matchers(version: &str) -> Vec<(&str, bool)> {
-    let mut matchers = vec![(version, true)];
+    let mut matchers = vec![(version, false)];
     if let Some(short) = version
         .strip_suffix(".0")
         .filter(|short| short.contains('.'))
     {
         matchers.push((short, false));
     }
+    matchers.push((version, true));
     matchers
 }
 
@@ -141,12 +143,13 @@ mod tests {
 
     #[test]
     fn line_matchers_cases() {
-        let cases: [(&str, &str, &[bool]); 5] = [
-            ("16.2.0", "## GCC 16.2", &[false, true]),
-            ("16.2.0", "## GCC 16.2.1", &[false, false]),
-            ("16.2.0", "## 16.2.0", &[true, false]),
-            ("1.0", "## 1 big release", &[false]),
-            ("1.2.3", "## 1.2.3", &[true]),
+        let cases: [(&str, &str, &[bool]); 6] = [
+            ("16.2.0", "## GCC 16.2", &[false, true, false]),
+            ("16.2.0", "## GCC 16.2.1", &[false, false, false]),
+            ("16.2.0", "## 16.2.0", &[true, false, true]),
+            ("1.0", "## 1 big release", &[false, false]),
+            ("1.2.3", "## 1.2.3", &[true, true]),
+            ("1.7", "## 1.7.1", &[false, true]),
         ];
         for (version, line, want) in cases {
             let got: Vec<bool> = line_matchers(version)

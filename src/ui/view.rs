@@ -1,14 +1,18 @@
+use std::num::NonZeroU16;
+use std::ops::Range;
+
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
-use std::ops::Range;
 
 use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Item, Upgrade};
 use super::keys::{self, Action};
+use super::markdown::Link;
 use crate::github::Stage;
 
 pub const ACCENT: Color = Color::Rgb(0x00, 0xD7, 0x87);
@@ -69,11 +73,37 @@ pub fn lines_in(app: &App, range: Range<usize>) -> Vec<Line<'static>> {
     lines
 }
 
+/// Links in `range`, with lines relative to its start.
+pub fn links_in(app: &App, range: Range<usize>) -> Vec<Link> {
+    let mut links = vec![];
+    for (index, &start) in app.item_lines.iter().enumerate() {
+        let body_start = start + 1;
+        links.extend(app.body_links(index).iter().filter_map(|link| {
+            let line = body_start + link.line;
+            range.contains(&line).then(|| Link {
+                line: line - range.start,
+                ..link.clone()
+            })
+        }));
+    }
+    links
+}
+
+/// Links move past the top border and the margin, border and padding.
 pub fn frame_body(
     mut content: Vec<Line<'static>>,
+    links: Vec<Link>,
     loading: Option<&Stage>,
     tick: usize,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<Link>) {
+    let links = links
+        .into_iter()
+        .map(|link| Link {
+            line: link.line + 1,
+            columns: link.columns.start + 4..link.columns.end + 4,
+            ..link
+        })
+        .collect();
     if let Some(stage) = loading {
         let text = match stage {
             Stage::Changelog => " checking changelog...".to_string(),
@@ -85,7 +115,7 @@ pub fn frame_body(
     if content.is_empty() {
         content.push(Line::styled("(empty)", dim()));
     }
-    frame(content)
+    (frame(content), links)
 }
 
 fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
@@ -235,6 +265,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     );
     let visible = lines_in(app, app.offset..app.offset + app.height as usize);
     frame.render_widget(Paragraph::new(visible), body);
+    // A link cell's forced width would hide the popup cells it spans.
+    if !app.show_help {
+        for link in links_in(app, app.offset..app.offset + app.height as usize) {
+            hyperlink(frame.buffer_mut(), body, &link);
+        }
+    }
     let footer_line = match &app.notice {
         Some(notice) => Line::styled(notice.clone(), Style::new().fg(ERROR)),
         None => Line::styled(hints(app), dim()),
@@ -243,6 +279,36 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.show_help {
         draw_help(frame, app);
     }
+}
+
+/// Rewrites a link's cells as one OSC 8 hyperlink in its first cell. The
+/// forced width keeps ratatui from counting the escape sequence as text.
+fn hyperlink(buffer: &mut Buffer, area: Rect, link: &Link) {
+    let offset = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
+    let y = area.y.saturating_add(offset(link.line));
+    let start = area.x.saturating_add(offset(link.columns.start));
+    let end = area
+        .x
+        .saturating_add(offset(link.columns.end))
+        .min(area.right());
+    if y >= area.bottom() {
+        return;
+    }
+    let mut text = String::new();
+    let mut x = start;
+    while x < end {
+        let Some(cell) = buffer.cell((x, y)) else {
+            return;
+        };
+        text.push_str(cell.symbol());
+        x = x.saturating_add(offset(cell.symbol().width().max(1)));
+    }
+    let (Some(width), Some(cell)) = (NonZeroU16::new(x - start), buffer.cell_mut((start, y)))
+    else {
+        return;
+    };
+    cell.set_symbol(&format!("\x1b]8;;{}\x1b\\{text}\x1b]8;;\x1b\\", link.url))
+        .set_diff_option(CellDiffOption::ForcedWidth(width));
 }
 
 /// Keys are read from the active keymap so overrides show up here.
@@ -488,6 +554,37 @@ mod tests {
             hints(&app),
             "[enter] expand/collapse  [a] upgrade all  [?] help  [ctrl+c] quit"
         );
+    }
+
+    #[test]
+    fn links_become_osc8_hyperlinks() {
+        let mut app = app(
+            vec![Item {
+                expanded: true,
+                body: Some("see [docs](https://d.io)".into()),
+                ..item("a")
+            }],
+            80,
+        );
+        assert_eq!(
+            links_in(&app, 0..app.line_count),
+            [Link {
+                line: 2,
+                columns: 8..12,
+                url: "https://d.io".into()
+            }]
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        // Header and blank line, then the row and the top border.
+        let cell = &terminal.backend().buffer()[(8, 4)];
+        assert_eq!(
+            cell.symbol(),
+            "\x1b]8;;https://d.io\x1b\\docs\x1b]8;;\x1b\\"
+        );
+        app.update(Message::Key("?".into()));
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        assert!(!format!("{:?}", terminal.backend().buffer()).contains("\x1b]8"));
     }
 
     #[test]

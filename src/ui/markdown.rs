@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -53,7 +54,18 @@ impl Palette {
     }
 }
 
-pub fn render(markdown: &str, width: usize, dark: bool) -> Vec<Line<'static>> {
+/// A link's columns on one rendered line; a wrapped link has one per line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub line: usize,
+    pub columns: Range<usize>,
+    pub url: String,
+}
+
+/// A span and the index of the URL it links to, if any.
+type Piece = (Span<'static>, Option<usize>);
+
+pub fn render(markdown: &str, width: usize, dark: bool) -> (Vec<Line<'static>>, Vec<Link>) {
     let mut renderer = Renderer::new(width.max(10), Palette::new(dark));
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
@@ -64,7 +76,7 @@ pub fn render(markdown: &str, width: usize, dark: bool) -> Vec<Line<'static>> {
     while renderer.lines.last().is_some_and(|line| line.width() == 0) {
         renderer.lines.pop();
     }
-    renderer.lines
+    (renderer.lines, renderer.links)
 }
 
 enum Container {
@@ -84,13 +96,16 @@ struct Renderer {
     width: usize,
     palette: Palette,
     lines: Vec<Line<'static>>,
-    spans: Vec<Span<'static>>,
+    spans: Vec<Piece>,
     styles: Vec<Style>,
     containers: Vec<Container>,
     /// A list item's marker, waiting for its first line.
     bullet: Option<String>,
     need_gap: bool,
-    links: Vec<(String, usize)>,
+    urls: Vec<String>,
+    /// The `urls` index of the link being rendered.
+    link: Option<usize>,
+    links: Vec<Link>,
     code_block: Option<String>,
     code_language: Option<String>,
     table: Option<Table>,
@@ -107,6 +122,8 @@ impl Renderer {
             containers: vec![],
             bullet: None,
             need_gap: false,
+            urls: vec![],
+            link: None,
             links: vec![],
             code_block: None,
             code_language: None,
@@ -132,7 +149,16 @@ impl Renderer {
             cell.push_str(text);
         } else {
             self.spans
-                .push(Span::styled(text.to_string(), self.style()));
+                .push((Span::styled(text.to_string(), self.style()), self.link));
+        }
+    }
+
+    /// Table cells are single lines, so breaks in them become spaces.
+    fn line_break(&mut self) {
+        if self.table.is_some() {
+            self.push_text(" ");
+        } else {
+            self.spans.push((Span::raw("\n"), None));
         }
     }
 
@@ -160,16 +186,17 @@ impl Renderer {
                     self.push_text(&code);
                 } else {
                     let style = self.style().patch(self.palette.code);
-                    self.spans.push(Span::styled(code.to_string(), style));
+                    self.spans
+                        .push((Span::styled(code.to_string(), style), self.link));
                 }
             }
             Event::SoftBreak => self.push_text(" "),
-            Event::HardBreak => self.spans.push(Span::raw("\n")),
+            Event::HardBreak => self.line_break(),
             // Release notes often use <br> for line breaks; other HTML is dropped.
             Event::InlineHtml(html)
                 if html.trim_start().to_ascii_lowercase().starts_with("<br") =>
             {
-                self.spans.push(Span::raw("\n"));
+                self.line_break();
             }
             Event::Rule => {
                 self.start_block();
@@ -246,7 +273,13 @@ impl Renderer {
                 .push(Style::new().add_modifier(Modifier::CROSSED_OUT)),
             Tag::Link { dest_url, .. } => {
                 self.styles.push(self.palette.link);
-                self.links.push((dest_url.to_string(), self.spans.len()));
+                // Relative and anchor links lead nowhere from a terminal.
+                if dest_url.contains("://") {
+                    // A control character would end the OSC 8 sequence early.
+                    self.urls
+                        .push(dest_url.chars().filter(|c| !c.is_control()).collect());
+                    self.link = Some(self.urls.len() - 1);
+                }
             }
             Tag::Image { .. } => {
                 self.styles.push(self.palette.dim);
@@ -287,22 +320,7 @@ impl Renderer {
             }
             TagEnd::Link => {
                 self.styles.pop();
-                if let Some((url, start)) = self.links.pop() {
-                    let text: String = self
-                        .spans
-                        .get(start..)
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|span| span.content.as_ref())
-                        .collect();
-                    // Issue, PR and user references would otherwise repeat
-                    // long GitHub URLs on nearly every release-note line.
-                    let is_reference = text.starts_with('#') || text.starts_with('@');
-                    if !url.is_empty() && !url.starts_with('#') && text != url && !is_reference {
-                        self.spans
-                            .push(Span::styled(format!(" ({url})"), self.palette.dim));
-                    }
-                }
+                self.link = None;
             }
             TagEnd::Image => {
                 self.push_text("]");
@@ -325,7 +343,7 @@ impl Renderer {
             self.palette.heading
         };
         let mut spans = std::mem::take(&mut self.spans);
-        for span in &mut spans {
+        for (span, _) in &mut spans {
             span.style = span.style.patch(style);
         }
         // "##" markers are kept so version headings read like the source file.
@@ -333,9 +351,9 @@ impl Renderer {
             HeadingLevel::H1 => " ".to_string(),
             level => format!("{} ", "#".repeat(level as usize)),
         };
-        spans.insert(0, Span::styled(marker, style));
+        spans.insert(0, (Span::styled(marker, style), None));
         if level == HeadingLevel::H1 {
-            spans.push(Span::styled(" ", style));
+            spans.push((Span::styled(" ", style), None));
         }
         self.spans = spans;
         self.end_block();
@@ -453,9 +471,32 @@ impl Renderer {
         }
         let spans = std::mem::take(&mut self.spans);
         let available = self.width.saturating_sub(self.prefix_width()).max(1);
-        for (index, line) in wrap(spans, available).into_iter().enumerate() {
+        for (index, pieces) in wrap(spans, available).into_iter().enumerate() {
             let mut full = self.prefix(index == 0);
-            full.extend(line);
+            let mut column: usize = full.iter().map(Span::width).sum();
+            for (span, link) in pieces {
+                let columns = column..column + span.width();
+                column = columns.end;
+                full.push(span);
+                let Some(url) = link.and_then(|link| self.urls.get(link)) else {
+                    continue;
+                };
+                let line = self.lines.len();
+                match self.links.last_mut() {
+                    Some(last)
+                        if last.line == line
+                            && last.columns.end == columns.start
+                            && last.url == *url =>
+                    {
+                        last.columns.end = columns.end;
+                    }
+                    _ => self.links.push(Link {
+                        line,
+                        columns,
+                        url: url.clone(),
+                    }),
+                }
+            }
             self.lines.push(Line::from(full));
         }
         self.bullet = None;
@@ -464,13 +505,13 @@ impl Renderer {
 
 /// Greedy word wrap. "\n" spans force a break, whitespace runs collapse to
 /// one space, and words wider than `width` are split.
-fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+fn wrap(spans: Vec<Piece>, width: usize) -> Vec<Vec<Piece>> {
     let mut lines = vec![];
-    let mut line: Vec<Span<'static>> = vec![];
+    let mut line: Vec<Piece> = vec![];
     let mut line_width = 0;
-    let mut pending_space: Option<Style> = None;
+    let mut pending_space: Option<(Style, Option<usize>)> = None;
 
-    for span in spans {
+    for (span, link) in spans {
         if span.content == "\n" {
             lines.push(std::mem::take(&mut line));
             line_width = 0;
@@ -480,7 +521,7 @@ fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
         for (is_space, piece) in split_words(&span.content) {
             if is_space {
                 if line_width > 0 {
-                    pending_space = Some(span.style);
+                    pending_space = Some((span.style, link));
                 }
                 continue;
             }
@@ -491,12 +532,12 @@ fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
                 line_width = 0;
                 pending_space = None;
             }
-            if let Some(style) = pending_space.take() {
-                line.push(Span::styled(" ", style));
+            if let Some((style, space_link)) = pending_space.take() {
+                line.push((Span::styled(" ", style), space_link));
                 line_width += 1;
             }
             if piece_width <= width {
-                line.push(Span::styled(piece.to_string(), span.style));
+                line.push((Span::styled(piece.to_string(), span.style), link));
                 line_width += piece_width;
                 continue;
             }
@@ -505,7 +546,7 @@ fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
                     lines.push(std::mem::take(&mut line));
                 }
                 line_width = chunk.width();
-                line.push(Span::styled(chunk, span.style));
+                line.push((Span::styled(chunk, span.style), link));
             }
         }
     }
@@ -644,6 +685,7 @@ mod tests {
 
     fn text(md: &str, width: usize) -> Vec<String> {
         render(md, width, true)
+            .0
             .iter()
             .map(|line| line.to_string())
             .collect()
@@ -659,7 +701,7 @@ mod tests {
 
     #[test]
     fn wraps_words_and_preserves_styles() {
-        let lines = render("aaa **bbb** ccc ddd", 8, true);
+        let (lines, _) = render("aaa **bbb** ccc ddd", 8, true);
         let rendered: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert_eq!(rendered, ["aaa bbb", "ccc ddd"]);
         let bold = lines[0]
@@ -700,7 +742,7 @@ mod tests {
 
     #[test]
     fn known_language_is_highlighted() {
-        let lines = render("```rust\nfn main() {}\n```", 40, true);
+        let (lines, _) = render("```rust\nfn main() {}\n```", 40, true);
         assert_eq!(
             lines
                 .iter()
@@ -728,7 +770,7 @@ mod tests {
     #[test]
     fn unknown_or_missing_language_stays_plain() {
         for markdown in ["```nosuchlang\nx = 1\n```", "```\nx = 1\n```", "    x = 1"] {
-            let lines = render(markdown, 40, true);
+            let (lines, _) = render(markdown, 40, true);
             assert_eq!(lines[0].to_string(), "  x = 1", "{markdown:?}");
             assert_eq!(
                 lines[0].spans[1].style,
@@ -740,7 +782,7 @@ mod tests {
 
     #[test]
     fn highlighted_lines_wrap_and_keep_styles() {
-        let lines = render("```sh\necho aaaaaaaaaaaaaaaa\n```", 14, false);
+        let (lines, _) = render("```sh\necho aaaaaaaaaaaaaaaa\n```", 14, false);
         let text: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert_eq!(text, ["  echo aaaaaaa", "  aaaaaaaaa"]);
         assert!(
@@ -752,11 +794,57 @@ mod tests {
         );
     }
 
+    fn link(line: usize, columns: Range<usize>, url: &str) -> Link {
+        Link {
+            line,
+            columns,
+            url: url.into(),
+        }
+    }
+
     #[test]
-    fn links_show_url_unless_reference() {
+    fn links_are_tracked_without_url_text() {
+        let (lines, links) = render(
+            "[docs](https://d.io) and [#12](https://gh/pull/12)",
+            80,
+            true,
+        );
+        assert_eq!(lines[0].to_string(), "docs and #12");
         assert_eq!(
-            text("[docs](https://d.io) and [#12](https://gh/pull/12)", 80),
-            ["docs (https://d.io) and #12"]
+            links,
+            [
+                link(0, 0..4, "https://d.io"),
+                link(0, 9..12, "https://gh/pull/12")
+            ]
+        );
+    }
+
+    #[test]
+    fn links_split_across_wrapped_lines_and_prefixes() {
+        let (lines, links) = render("- aaa [bb cc](https://x.io) dd", 8, true);
+        let text: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+        assert_eq!(text, ["• aaa bb", "  cc dd"]);
+        assert_eq!(
+            links,
+            [link(0, 6..8, "https://x.io"), link(1, 2..4, "https://x.io")]
+        );
+    }
+
+    #[test]
+    fn relative_links_and_control_characters_are_not_linked() {
+        assert_eq!(render("[x](docs/x.md) [y](#y)", 80, true).1, []);
+        // An escape in the URL would otherwise end the OSC 8 sequence early.
+        assert_eq!(
+            render("[z](<https://z.io/a\u{1b}\u{7}b>)", 80, true).1,
+            [link(0, 0..1, "https://z.io/ab")]
+        );
+    }
+
+    #[test]
+    fn table_cells_keep_links_and_breaks() {
+        assert_eq!(
+            text("| [#1](https://x/1) | a<br>b |\n|---|---|\n| c | d |", 40),
+            ["#1 │ a b", "───┼────", "c  │ d  "]
         );
     }
 

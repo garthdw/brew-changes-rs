@@ -76,7 +76,7 @@ for name in $names; do
   curl -fsSL "https://raw.githubusercontent.com/Homebrew/homebrew-core/${commit}/${formula_path}" -o "$dest"
 
   echo "==> Uninstalling current ${name} (if installed)"
-  brew uninstall --ignore-dependencies "$name" >/dev/null 2>&1 || true
+  brew uninstall --ignore-dependencies "$name" &>/dev/null || true
 
   echo "==> Installing downgraded ${name} from ${TAP}"
   brew install "${TAP}/${name}"

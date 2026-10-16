@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
-use futures::StreamExt;
-use futures::future::BoxFuture;
+use futures::future::{BoxFuture, join_all};
 use serde::Deserialize;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 // A single unresolvable name fails a whole `brew info` call, so batches bound
 // the blast radius before bisection.
@@ -201,11 +201,14 @@ pub async fn resolve_info_batch(
     names: &[String],
     is_cask: bool,
 ) -> Result<HashMap<String, Info>> {
-    let results: Vec<_> = futures::stream::iter(names.chunks(INFO_BATCH_SIZE))
-        .map(|chunk| resolve_chunk(run.clone(), chunk.to_vec(), is_cask))
-        .buffer_unordered(INFO_CONCURRENCY)
-        .collect()
-        .await;
+    // Shared with bisection, which would otherwise multiply concurrent brews.
+    let permits = Arc::new(Semaphore::new(INFO_CONCURRENCY));
+    let results = join_all(
+        names
+            .chunks(INFO_BATCH_SIZE)
+            .map(|chunk| resolve_chunk(run.clone(), permits.clone(), chunk.to_vec(), is_cask)),
+    )
+    .await;
     let mut infos = HashMap::new();
     let mut first_error = None;
     for result in results {
@@ -227,11 +230,16 @@ pub async fn resolve_info_batch(
 /// names.
 fn resolve_chunk(
     run: Arc<InfoRunner>,
+    permits: Arc<Semaphore>,
     chunk: Vec<String>,
     is_cask: bool,
 ) -> BoxFuture<'static, Result<HashMap<String, Info>>> {
     Box::pin(async move {
-        match run(chunk.clone(), is_cask).await {
+        let result = {
+            let _permit = permits.acquire().await?;
+            run(chunk.clone(), is_cask).await
+        };
+        match result {
             Ok(output) => parse_info(&output)
                 .with_context(|| format!("parsing brew info output for {chunk:?}")),
             Err(_) if chunk.len() == 1 => Ok(HashMap::new()),
@@ -239,8 +247,8 @@ fn resolve_chunk(
             Err(RunError::Exit) => {
                 let (left, right) = chunk.split_at(chunk.len() / 2);
                 let (left, right) = tokio::join!(
-                    resolve_chunk(run.clone(), left.to_vec(), is_cask),
-                    resolve_chunk(run, right.to_vec(), is_cask)
+                    resolve_chunk(run.clone(), permits.clone(), left.to_vec(), is_cask),
+                    resolve_chunk(run, permits, right.to_vec(), is_cask)
                 );
                 // A half that fails outright just loses its names; the rest
                 // of the list still gets metadata.
@@ -301,11 +309,20 @@ fn upgrade_args<'a>(names: &[&'a str], is_cask: bool) -> Vec<&'a str> {
 pub async fn upgrade_quiet(name: &str, is_cask: bool) -> Result<()> {
     let args = upgrade_args(&[name], is_cask);
     let command = format!("brew {}", args.join(" "));
-    let output = Command::new("brew")
-        .args(&args)
-        .output()
-        .await
-        .with_context(|| command.clone())?;
+    let mut brew = Command::new("brew");
+    brew.args(&args);
+    // Without a controlling terminal, sudo fails fast instead of prompting
+    // over the UI and competing for keystrokes.
+    // SAFETY: setsid is async-signal-safe and touches no parent state.
+    unsafe {
+        brew.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = brew.output().await.with_context(|| command.clone())?;
     if output.status.success() {
         return Ok(());
     }
@@ -314,7 +331,16 @@ pub async fn upgrade_quiet(name: &str, is_cask: bool) -> Result<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    Err(anyhow!("{command}: {}\n{}", output.status, combined.trim()))
+    let hint = if combined.contains("a terminal is required") {
+        "\n\nThis upgrade needs a password; use upgrade all, which runs in the terminal."
+    } else {
+        ""
+    };
+    Err(anyhow!(
+        "{command}: {}\n{}{hint}",
+        output.status,
+        combined.trim()
+    ))
 }
 
 /// Casks are attempted even if the formula upgrade fails, and every failure
@@ -463,6 +489,32 @@ mod tests {
         let mut sizes: Vec<_> = calls.lock().unwrap().iter().map(Vec::len).collect();
         sizes.sort();
         assert_eq!(sizes, [20, 50, 50]);
+    }
+
+    #[tokio::test]
+    async fn bisection_stays_within_concurrency_limit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let run: Arc<InfoRunner> = Arc::new({
+            let in_flight = in_flight.clone();
+            let peak = peak.clone();
+            move |_, _| {
+                let in_flight = in_flight.clone();
+                let peak = peak.clone();
+                Box::pin(async move {
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    Err(RunError::Exit)
+                })
+            }
+        });
+        let names: Vec<String> = (0..120).map(|i| format!("p{i}")).collect();
+        let infos = resolve_info_batch(run, &names, false).await.unwrap();
+        assert!(infos.is_empty());
+        assert!(peak.load(Ordering::SeqCst) <= INFO_CONCURRENCY);
     }
 
     #[tokio::test]

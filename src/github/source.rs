@@ -76,7 +76,9 @@ fn parse_github_url(url: &str) -> Option<GitHubUrl<'_>> {
             })
         })?;
     let (owner, after_owner) = url[host_end..].split_once('/')?;
-    let repo_end = after_owner.find('/').unwrap_or(after_owner.len());
+    let repo_end = after_owner
+        .find(['/', '?', '#'])
+        .unwrap_or(after_owner.len());
     let (segment, rest) = after_owner.split_at(repo_end);
     let repo = segment
         .strip_suffix(".git")
@@ -169,6 +171,12 @@ mod tests {
                 "",
                 "https://raw.githubusercontent.com/owner/repo/main/x",
                 some("owner", "repo"),
+            ),
+            ("https://github.com/o/tool#readme", "", some("o", "tool")),
+            (
+                "https://github.com/o/tool?tab=readme-ov-file",
+                "",
+                some("o", "tool"),
             ),
             ("", "", None),
         ];
