@@ -88,6 +88,7 @@ pub fn upstream_version(version: &str, is_cask: bool) -> String {
 pub struct Info {
     pub homepage: String,
     pub url: String,
+    pub head: String,
     pub version: String,
 }
 
@@ -143,14 +144,10 @@ struct InfoResult {
 fn parse_info(json: &[u8]) -> Result<HashMap<String, Info>> {
     let result: InfoResult = serde_json::from_slice(json)?;
     let formulae = result.formulae.into_iter().map(|formula| {
-        let url = [formula.urls.stable, formula.urls.head]
-            .into_iter()
-            .flatten()
-            .map(|field| field.url)
-            .find(|url| !url.is_empty());
         let info = Info {
             homepage: formula.homepage.unwrap_or_default(),
-            url: url.unwrap_or_default(),
+            url: formula.urls.stable.unwrap_or_default().url,
+            head: formula.urls.head.unwrap_or_default().url,
             version: formula.versions.stable.unwrap_or_default(),
         };
         (formula.full_name, info)
@@ -160,6 +157,7 @@ fn parse_info(json: &[u8]) -> Result<HashMap<String, Info>> {
             homepage: cask.homepage.unwrap_or_default(),
             url: cask.url.unwrap_or_default(),
             version: upstream_version(&cask.version.unwrap_or_default(), true),
+            ..Default::default()
         };
         (cask.full_token, info)
     });
@@ -399,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn info_parsing_prefers_stable_url() {
+    fn info_parsing_keeps_stable_and_head_urls() {
         let raw = br#"{
             "formulae": [{
                 "name": "opencode", "full_name": "anomalyco/tap/opencode", "homepage": "https://example.com",
@@ -417,16 +415,18 @@ mod tests {
             Info {
                 homepage: "https://example.com".into(),
                 url: "https://example.com/stable.tar.gz".into(),
+                head: "https://example.com/head.tar.gz".into(),
                 version: "1.2.3".into()
             }
         );
-        assert_eq!(infos["headonly"].url, "https://example.com/head.git");
+        assert_eq!(infos["headonly"].head, "https://example.com/head.git");
         assert_eq!(
             infos["someuser/tap/app"],
             Info {
                 homepage: "https://example.com".into(),
                 url: "https://example.com/app.dmg".into(),
-                version: "2.0".into()
+                version: "2.0".into(),
+                ..Default::default()
             }
         );
     }

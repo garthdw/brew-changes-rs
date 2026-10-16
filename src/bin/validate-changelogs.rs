@@ -173,7 +173,11 @@ async fn top_packages(count: usize, is_cask: bool) -> Result<(Vec<Package>, Vec<
 /// An HTML page lacking the version counts as a failure, since the app can
 /// only show it as a link.
 async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
-    let source = resolve_source(&package.name, &package.current, &info.homepage, &info.url);
+    let source = resolve_source(
+        &package.name,
+        &package.current,
+        &[&info.homepage, &info.url, &info.head],
+    );
     let changelog = client
         .fetch(&source, &package.installed, &package.current, |_| {})
         .await;
@@ -186,7 +190,10 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
     match changelog {
         Changelog::NoSource => {
             outcome.source = "no-repo".into();
-            outcome.note = format!("homepage={} url={}", info.homepage, info.url);
+            outcome.note = format!(
+                "homepage={} url={} head={}",
+                info.homepage, info.url, info.head
+            );
         }
         Changelog::ManualHtmlWithoutVersion => {
             outcome.source = "manual".into();

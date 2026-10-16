@@ -32,7 +32,11 @@ async fn run_app() -> Result<()> {
         .into_iter()
         .zip(infos)
         .map(|(package, info)| Item {
-            source: resolve_source(&package.name, &package.current, &info.homepage, &info.url),
+            source: resolve_source(
+                &package.name,
+                &package.current,
+                &[&info.homepage, &info.url, &info.head],
+            ),
             name: package.name,
             is_cask: package.is_cask,
             installed: package.installed,

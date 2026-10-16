@@ -26,13 +26,14 @@ impl Source {
 
 /// The single place a changelog source is chosen, shared by the app and the
 /// validator so the validator exercises the shipped path.
-pub fn resolve_source(name: &str, version: &str, homepage: &str, url: &str) -> Source {
+/// `urls` are tried in order for a GitHub repo.
+pub fn resolve_source(name: &str, version: &str, urls: &[&str]) -> Source {
     let entry = config::get(name);
     let (owner, repo) = if !entry.repo.is_empty() {
         let (owner, repo) = entry.repo.split_once('/').unwrap_or((&entry.repo, ""));
         (owner.to_string(), repo.to_string())
     } else if entry.url.is_empty() {
-        resolve_repo(homepage, url).unwrap_or_default()
+        resolve_repo(urls).unwrap_or_default()
     } else {
         Default::default()
     };
@@ -92,10 +93,9 @@ fn parse_github_url(url: &str) -> Option<GitHubUrl<'_>> {
     })
 }
 
-fn resolve_repo(homepage: &str, url: &str) -> Option<(String, String)> {
-    [homepage, url]
-        .into_iter()
-        .find_map(parse_github_url)
+fn resolve_repo(urls: &[&str]) -> Option<(String, String)> {
+    urls.iter()
+        .find_map(|url| parse_github_url(url))
         .map(|parsed| (parsed.owner.to_string(), parsed.repo.to_string()))
 }
 
@@ -182,11 +182,19 @@ mod tests {
         ];
         for (homepage, url, want) in cases {
             assert_eq!(
-                resolve_repo(homepage, url),
+                resolve_repo(&[homepage, url]),
                 want,
                 "resolve_repo({homepage:?}, {url:?})"
             );
         }
+        assert_eq!(
+            resolve_repo(&[
+                "https://nginx.org/",
+                "https://nginx.org/download/nginx-1.31.7.tar.gz",
+                "https://github.com/nginx/nginx.git",
+            ]),
+            some("nginx", "nginx")
+        );
     }
 
     #[test]
@@ -239,13 +247,13 @@ mod tests {
             ),
         ];
         for (package, homepage, want) in cases {
-            assert_eq!(resolve_source(package, "", homepage, ""), want, "{package}");
+            assert_eq!(resolve_source(package, "", &[homepage]), want, "{package}");
         }
     }
 
     #[test]
     fn resolve_source_expands_placeholders() {
-        let source = resolve_source("ansible", "12.1.0", "", "");
+        let source = resolve_source("ansible", "12.1.0", &[]);
         assert_eq!(
             source.manual_url,
             "https://github.com/ansible-community/ansible-build-data/blob/main/12/CHANGELOG-v12.rst"
