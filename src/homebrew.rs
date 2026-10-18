@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::process::Output;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -324,6 +325,10 @@ pub async fn upgrade_quiet(name: &str, is_cask: bool) -> Result<()> {
     if output.status.success() {
         return Ok(());
     }
+    Err(upgrade_failure(&command, &output))
+}
+
+fn upgrade_failure(command: &str, output: &Output) -> anyhow::Error {
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -334,11 +339,7 @@ pub async fn upgrade_quiet(name: &str, is_cask: bool) -> Result<()> {
     } else {
         ""
     };
-    Err(anyhow!(
-        "{command}: {}\n{}{hint}",
-        output.status,
-        combined.trim()
-    ))
+    anyhow!("{command}: {}\n{}{hint}", output.status, combined.trim())
 }
 
 /// Casks are attempted even if the formula upgrade fails, and every failure
@@ -528,6 +529,39 @@ mod tests {
         let names: Vec<String> = ["a", "b"].map(String::from).to_vec();
         assert!(resolve_info_batch(run, &names, false).await.is_err());
         assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upgrade_args_cases() {
+        assert_eq!(upgrade_args(&["git"], false), ["upgrade", "git"]);
+        assert_eq!(
+            upgrade_args(&["a", "b"], true),
+            ["upgrade", "--cask", "a", "b"]
+        );
+    }
+
+    #[test]
+    fn upgrade_failure_includes_output_and_password_hint() {
+        use std::os::unix::process::ExitStatusExt;
+        let failure = |stderr: &str| {
+            upgrade_failure(
+                "brew upgrade --cask app",
+                &Output {
+                    status: std::process::ExitStatus::from_raw(1 << 8),
+                    stdout: b"==> Upgrading app\n".to_vec(),
+                    stderr: stderr.as_bytes().to_vec(),
+                },
+            )
+            .to_string()
+        };
+        assert_eq!(
+            failure("Error: boom\n"),
+            "brew upgrade --cask app: exit status: 1\n==> Upgrading app\nError: boom"
+        );
+        assert!(
+            failure("sudo: a terminal is required to read the password\n")
+                .ends_with("use upgrade all, which runs in the terminal.")
+        );
     }
 
     #[tokio::test]
