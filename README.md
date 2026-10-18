@@ -106,7 +106,7 @@ scripts/downgrade-for-testing.sh jq bat            # create real outdated packag
 ## Releasing
 
 Publishing a GitHub Release (with a `vX.Y.Z` tag) triggers
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which runs
-[GoReleaser](https://goreleaser.com) with `cargo zigbuild` to build macOS and
-Linux binaries (arm64 + amd64), attach them to the release, and commit the
-regenerated `Formula/brew-changes-rs.rb` to `garthdw/homebrew-tap`.
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which builds
+macOS arm64 and Linux (arm64 + amd64, musl) binaries in parallel, then runs
+[GoReleaser](https://goreleaser.com) to attach them to the release and commit
+the regenerated `Formula/brew-changes-rs.rb` to `garthdw/homebrew-tap`.

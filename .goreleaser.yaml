@@ -4,14 +4,10 @@ builds:
   - id: brew-changes
     builder: rust
     binary: brew-changes
-    command: zigbuild
-    env:
-      - BREW_CHANGES_VERSION={{ .Version }}
-    flags:
-      - --release
-      - --bin=brew-changes
+    # The release workflow builds each target in parallel; this only stages them.
+    tool: ./scripts/prebuilt-cargo.sh
+    command: build
     targets:
-      - x86_64-apple-darwin
       - aarch64-apple-darwin
       - x86_64-unknown-linux-musl
       - aarch64-unknown-linux-musl

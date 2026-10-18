@@ -6,7 +6,7 @@ description: Cut a new brew-changes release via gh release create, with custom n
 # Releasing brew-changes
 
 Publishing a GitHub Release here is what triggers everything else: `.github/workflows/release.yml`
-fires on `release: published`, runs GoReleaser to cross-compile the macOS and Linux binaries,
+fires on `release: published`, builds the macOS and Linux binaries in parallel, runs GoReleaser,
 attaches them to the release, and auto-commits the regenerated `Formula/brew-changes-rs.rb` to
 `garthdw/homebrew-tap`. `gh release create <tag>` creates the tag itself (from the target commit)
 as part of creating the release — do not `git tag`/`git push` separately first.
