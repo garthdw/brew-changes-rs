@@ -47,5 +47,6 @@ goreleaser release --snapshot --skip=publish --clean   # stages prebuilt/brew-ch
 - `github::Client::fetch`: manual URL, else the repo's changelog file (one root listing), else releases (tags fallback), returning a `Changelog` enum with one variant per outcome. `Client` holds the API/raw base URLs so tests point it at `wiremock`.
 - `changelog::trim_to_range`, `template` and `version`: heading detection, the per-entry `url`/`version`/`heading` templates, and version/tag matching.
 - `ui::app`: state plus a pure `update(Message) -> Vec<Effect>`; UI behaviour is tested there without a terminal. It caches each expanded body already framed. `ui::run` executes effects on tokio and feeds results back as `Message`s. `ui::view::lines_in` builds only the visible window from the cached frames; `ui::markdown` renders Markdown with pulldown-cmark.
+- `tests/e2e.rs` runs the real binary in a detached tmux session (tmux required) with a `brew` shim on `PATH` and `BREW_CHANGES_GITHUB_API` pointing `Client::new` at a `wiremock` server.
 
 Changelog bodies are fetched lazily on first expand; nothing touches GitHub before the list is shown.
