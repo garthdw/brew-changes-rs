@@ -37,7 +37,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 cargo run                                          # the TUI
 cargo run --bin validate-changelogs -- 100 [-cask] # resolution/fetch over real top packages
 cargo run --bin validate-changelogs -- -outdated
-goreleaser release --snapshot --skip=publish --clean   # needs cargo-zigbuild + rustup targets
+goreleaser release --snapshot --skip=publish --clean   # stages prebuilt/brew-changes-<target>/brew-changes (release.yml builds them)
 ```
 
 ## Architecture

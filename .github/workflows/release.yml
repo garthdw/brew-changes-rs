@@ -8,20 +8,56 @@ permissions:
   contents: write
 
 jobs:
-  goreleaser:
-    # macOS builds the Apple targets natively; zig cross-links the Linux ones.
-    runs-on: macos-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            cargo: build
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            cargo: zigbuild
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            cargo: zigbuild
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - run: rustup target add ${{ matrix.target }}
+
+      # zig compiles aws-lc-sys's C against musl; glibc's cc would not.
+      - if: matrix.cargo == 'zigbuild'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - if: matrix.cargo == 'zigbuild'
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: cargo-zigbuild
+
+      # Matches goreleaser's `.Version`, which strips the tag's `v`.
+      - run: BREW_CHANGES_VERSION="${GITHUB_REF_NAME#v}" cargo ${{ matrix.cargo }} --release --bin=brew-changes --target=${{ matrix.target }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brew-changes-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/brew-changes
+          if-no-files-found: error
+
+  goreleaser:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: Install Rust targets and cargo-zigbuild
-        run: |
-          rustup target add x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-          brew install cargo-zigbuild
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: prebuilt
 
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
