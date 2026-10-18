@@ -31,16 +31,19 @@ changelog:
       - "^test:"
 
 brews:
-  - name: brew-changes
+  - name: brew-changes-rs
     repository:
       owner: garthdw
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
-    homepage: "https://github.com/garthdw/brew-changes"
+    homepage: "https://github.com/garthdw/brew-changes-rs"
     description: "Interactive changelog viewer for outdated Homebrew packages"
     license: "MIT"
+    # Both formulae install `brew-changes`, so only one can be linked at a time.
+    conflicts:
+      - brew-changes
     commit_author:
       name: Garth de Wet
       email: garth@dewet.dev

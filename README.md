@@ -12,10 +12,12 @@ Releases. Then upgrade everything, or just the one you're looking at.
 ## Install
 
 ```sh
-brew install garthdw/tap/brew-changes
+brew install garthdw/tap/brew-changes-rs
 ```
 
-This installs a prebuilt binary. No Rust toolchain is needed.
+This installs a prebuilt binary. No Rust toolchain is needed. It conflicts
+with the Go `brew-changes` formula, since both provide `brew changes`; switch
+between them with `brew unlink brew-changes && brew link brew-changes-rs`.
 
 ## Usage
 
@@ -107,4 +109,4 @@ Publishing a GitHub Release (with a `vX.Y.Z` tag) triggers
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which runs
 [GoReleaser](https://goreleaser.com) with `cargo zigbuild` to build macOS and
 Linux binaries (arm64 + amd64), attach them to the release, and commit the
-regenerated `Formula/brew-changes.rb` to `garthdw/homebrew-tap`.
+regenerated `Formula/brew-changes-rs.rb` to `garthdw/homebrew-tap`.

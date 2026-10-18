@@ -336,7 +336,7 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
         Line::raw(""),
         Line::raw("by Garth de Wet"),
         Line::raw("made with Claude Code"),
-        Line::raw("https://github.com/garthdw/brew-changes"),
+        Line::raw("https://github.com/garthdw/brew-changes-rs"),
         Line::raw(""),
     ];
     for (key, (_, label)) in keys.iter().zip(HELP_ROWS) {

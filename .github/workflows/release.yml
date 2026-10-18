@@ -21,8 +21,7 @@ jobs:
       - name: Install Rust targets and cargo-zigbuild
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-          brew install zig
-          cargo install --locked cargo-zigbuild
+          brew install cargo-zigbuild
 
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
