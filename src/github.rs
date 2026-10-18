@@ -37,6 +37,10 @@ struct RawFetchError {
 
 impl Client {
     pub fn new() -> Result<Self> {
+        // Lets tests/e2e.rs point the real binary at a mock server.
+        if let Ok(base) = std::env::var("BREW_CHANGES_GITHUB_API") {
+            return Self::with_bases(&base, &format!("{base}/raw"));
+        }
         Self::with_bases(
             "https://api.github.com",
             "https://raw.githubusercontent.com",
