@@ -9,6 +9,10 @@ use brew_changes::ui::run::{detect_dark_background, run};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("brew-changes {}", brew_changes::VERSION);
+        return ExitCode::SUCCESS;
+    }
     match run_app().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

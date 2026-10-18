@@ -328,7 +328,10 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
         .collect();
     let key_width = keys.iter().map(|key| key.width()).max().unwrap_or(0);
     let mut lines = vec![
-        Line::styled("brew-changes", bold()),
+        Line::from(vec![
+            Span::styled("brew-changes", bold()),
+            Span::styled(format!(" {}", crate::VERSION), dim()),
+        ]),
         Line::styled(
             "Interactive changelog viewer for outdated Homebrew packages",
             dim(),
@@ -605,6 +608,7 @@ mod tests {
         app.update(Message::Key("?".into()));
         let rendered = screen(&app);
         assert!(rendered.contains("About") && rendered.contains("press any key to close"));
+        assert!(rendered.contains(&format!("brew-changes {}", env!("CARGO_PKG_VERSION"))));
         assert!(rendered.contains("J/K/↑/↓"));
     }
 }

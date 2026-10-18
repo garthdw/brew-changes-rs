@@ -5,6 +5,8 @@ builds:
     builder: rust
     binary: brew-changes
     command: zigbuild
+    env:
+      - BREW_CHANGES_VERSION={{ .Version }}
     flags:
       - --release
       - --bin=brew-changes
@@ -50,4 +52,4 @@ brews:
     install: |
       bin.install "brew-changes"
     test: |
-      assert_match "Checking for outdated packages", shell_output("#{bin}/brew-changes 2>&1", 0..1)
+      assert_match version.to_s, shell_output("#{bin}/brew-changes --version")
