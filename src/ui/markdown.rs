@@ -160,7 +160,7 @@ impl Renderer {
             Event::Rule => {
                 self.start_block();
                 let rule = "─".repeat(self.width.saturating_sub(self.prefix_width()));
-                let mut spans = self.prefix(false);
+                let mut spans = self.first_prefix();
                 spans.push(Span::styled(rule, self.theme.muted));
                 self.lines.push(Line::from(spans));
                 self.need_gap = true;
@@ -332,7 +332,7 @@ impl Renderer {
         let available = self.width.saturating_sub(self.prefix_width() + 2).max(1);
         for source_line in source_lines {
             for chunk in split_spans_by_width(source_line, available) {
-                let mut spans = self.prefix(false);
+                let mut spans = self.first_prefix();
                 spans.push(Span::raw("  "));
                 spans.extend(chunk);
                 self.lines.push(Line::from(spans));
@@ -371,7 +371,7 @@ impl Renderer {
             } else {
                 Style::new()
             };
-            let mut spans = self.prefix(false);
+            let mut spans = self.first_prefix();
             for (column, width) in widths.iter().enumerate() {
                 if column > 0 {
                     spans.push(Span::styled(" │ ", self.theme.muted));
@@ -428,8 +428,8 @@ impl Renderer {
         }
         let spans = std::mem::take(&mut self.spans);
         let available = self.width.saturating_sub(self.prefix_width()).max(1);
-        for (index, pieces) in wrap(spans, available).into_iter().enumerate() {
-            let mut full = self.prefix(index == 0);
+        for pieces in wrap(spans, available) {
+            let mut full = self.first_prefix();
             let mut column: usize = full.iter().map(Span::width).sum();
             for (span, link) in pieces {
                 let columns = column..column + span.width();
@@ -456,7 +456,14 @@ impl Renderer {
             }
             self.lines.push(Line::from(full));
         }
+    }
+
+    /// The prefix for a block's next line, consuming any pending list marker
+    /// so it lands on the item's first line whatever block starts it.
+    fn first_prefix(&mut self) -> Vec<Span<'static>> {
+        let prefix = self.prefix(true);
         self.bullet = None;
+        prefix
     }
 }
 
@@ -707,6 +714,16 @@ mod tests {
                 "1. first"
             ]
         );
+    }
+
+    #[test]
+    fn items_starting_with_a_block_keep_their_marker() {
+        assert_eq!(text("- ```\n  foo\n  ```", 40), ["•   foo"]);
+        assert_eq!(
+            text("1. ```\n   code\n   ```\n\n   text", 40),
+            ["1.   code", "   ", "   text"]
+        );
+        assert_eq!(text("- | a |\n  |---|\n  | 1 |", 40), ["• a", "  ─", "  1"]);
     }
 
     #[test]
