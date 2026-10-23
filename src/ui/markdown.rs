@@ -562,12 +562,79 @@ fn split_by_width(text: &str, width: usize) -> Vec<String> {
 // Loaded on first use so the list still appears instantly at startup.
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 
-/// Scope operations per line of a code block, by syntax name and code.
+/// Enough for every code block of many expanded bodies, so re-rendering them
+/// all for a theme preview doesn't evict its own blocks.
+const PARSE_CACHE_ENTRIES: usize = 512;
+
+/// Scope operations per line of a code block.
+type Operations = Vec<Vec<(usize, ScopeStackOp)>>;
+
 /// Parsing is nearly all of highlighting's cost and doesn't depend on the
-/// theme, so a theme change or resize only restyles. Kept for the session,
-/// as bodies are.
-type Parsed = HashMap<(String, String), Vec<Vec<(usize, ScopeStackOp)>>>;
-static PARSED: LazyLock<Mutex<Parsed>> = LazyLock::new(Mutex::default);
+/// theme, so a theme change or resize only restyles. Blocks are kept by
+/// frecency, so a long session's memory stays bounded while blocks of bodies
+/// still being viewed are kept.
+struct ParseCache {
+    /// By syntax name and code.
+    entries: HashMap<(String, String), Cached>,
+    clock: u64,
+    capacity: usize,
+}
+
+struct Cached {
+    operations: Operations,
+    uses: u32,
+    last_used: u64,
+}
+
+impl ParseCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: 0,
+            capacity,
+        }
+    }
+
+    fn operations(
+        &mut self,
+        key: (String, String),
+        parse: impl FnOnce() -> Option<Operations>,
+    ) -> Option<&Operations> {
+        self.clock += 1;
+        if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
+            self.evict();
+        }
+        let cached = match self.entries.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(Cached {
+                operations: parse()?,
+                uses: 0,
+                last_used: 0,
+            }),
+        };
+        cached.uses = cached.uses.saturating_add(1);
+        cached.last_used = self.clock;
+        Some(&cached.operations)
+    }
+
+    /// Drops the entry with the fewest uses per tick since it was last used.
+    fn evict(&mut self) {
+        let clock = self.clock;
+        let frecency =
+            |cached: &Cached| f64::from(cached.uses) / (clock - cached.last_used + 1) as f64;
+        let least = self
+            .entries
+            .iter()
+            .min_by(|(_, left), (_, right)| frecency(left).total_cmp(&frecency(right)))
+            .map(|(key, _)| key.clone());
+        if let Some(key) = least {
+            self.entries.remove(&key);
+        }
+    }
+}
+
+static PARSED: LazyLock<Mutex<ParseCache>> =
+    LazyLock::new(|| Mutex::new(ParseCache::new(PARSE_CACHE_ENTRIES)));
 
 /// None for an unknown language or a highlighting failure, so the caller
 /// falls back to plain code styling.
@@ -575,16 +642,12 @@ fn highlight(code: &str, language: &str, theme_name: &str) -> Option<Vec<Vec<Spa
     let syntax = SYNTAXES.find_syntax_by_token(language)?;
     let theme = SYNTAX_THEMES.themes.get(theme_name)?;
     let mut parsed = PARSED.lock().ok()?;
-    let operations = match parsed.entry((syntax.name.clone(), code.to_string())) {
-        Entry::Occupied(entry) => entry.into_mut(),
-        Entry::Vacant(entry) => {
-            let mut state = ParseState::new(syntax);
-            let operations = LinesWithEndings::from(code)
-                .map(|line| state.parse_line(line, &SYNTAXES).ok())
-                .collect::<Option<_>>()?;
-            entry.insert(operations)
-        }
-    };
+    let operations = parsed.operations((syntax.name.clone(), code.to_string()), || {
+        let mut state = ParseState::new(syntax);
+        LinesWithEndings::from(code)
+            .map(|line| state.parse_line(line, &SYNTAXES).ok())
+            .collect()
+    })?;
     let highlighter = Highlighter::new(theme);
     let mut state = HighlightState::new(&highlighter, ScopeStack::new());
     let lines = LinesWithEndings::from(code)
@@ -812,6 +875,28 @@ mod tests {
                 assert_eq!(actual.as_ref(), Some(&expected), "{theme_name}");
             }
         }
+    }
+
+    #[test]
+    fn parse_cache_evicts_the_least_frecent_block() {
+        let mut cache = ParseCache::new(2);
+        let parses = std::cell::Cell::new(0);
+        let mut get = |code: &str| {
+            cache
+                .operations(("Rust".into(), code.into()), || {
+                    parses.set(parses.get() + 1);
+                    Some(vec![])
+                })
+                .is_some()
+        };
+        for code in ["often", "often", "often", "once", "new"] {
+            assert!(get(code));
+        }
+        assert_eq!(parses.get(), 3);
+        assert!(get("often"));
+        assert_eq!(parses.get(), 3, "the often used block was kept");
+        assert!(get("once"));
+        assert_eq!(parses.get(), 4, "the block used once was evicted");
     }
 
     #[test]
