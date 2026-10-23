@@ -1,58 +1,17 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::Range;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{FontStyle, HighlightIterator, HighlightState, Highlighter};
+use syntect::parsing::{ParseState, ScopeStack, ScopeStackOp, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::view::{bold, dim};
-
-struct Palette {
-    heading: Style,
-    title: Style,
-    code: Style,
-    code_block: Style,
-    link: Style,
-    dim: Style,
-    syntax_theme: &'static str,
-}
-
-impl Palette {
-    fn new(dark: bool) -> Self {
-        let (heading, code_background, block_foreground, link) = if dark {
-            (39, 236, 250, 33)
-        } else {
-            (27, 254, 238, 27)
-        };
-        Self {
-            heading: Style::new()
-                .fg(Color::Indexed(heading))
-                .add_modifier(Modifier::BOLD),
-            title: Style::new()
-                .fg(Color::Indexed(228))
-                .bg(Color::Indexed(63))
-                .add_modifier(Modifier::BOLD),
-            code: Style::new()
-                .fg(Color::Indexed(203))
-                .bg(Color::Indexed(code_background)),
-            code_block: Style::new().fg(Color::Indexed(block_foreground)),
-            link: Style::new()
-                .fg(Color::Indexed(link))
-                .add_modifier(Modifier::UNDERLINED),
-            dim: dim(),
-            syntax_theme: if dark {
-                "base16-ocean.dark"
-            } else {
-                "InspiredGitHub"
-            },
-        }
-    }
-}
+use super::theme::{SYNTAX_THEMES, Theme, terminal_color};
 
 /// A link's columns on one rendered line; a wrapped link has one per line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,8 +24,8 @@ pub struct Link {
 /// A span and the index of the URL it links to, if any.
 type Piece = (Span<'static>, Option<usize>);
 
-pub fn render(markdown: &str, width: usize, dark: bool) -> (Vec<Line<'static>>, Vec<Link>) {
-    let mut renderer = Renderer::new(width.max(10), Palette::new(dark));
+pub fn render(markdown: &str, width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<Link>) {
+    let mut renderer = Renderer::new(width.max(10), *theme);
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     for event in Parser::new_ext(markdown, options) {
@@ -94,7 +53,7 @@ struct Table {
 
 struct Renderer {
     width: usize,
-    palette: Palette,
+    theme: Theme,
     lines: Vec<Line<'static>>,
     spans: Vec<Piece>,
     styles: Vec<Style>,
@@ -112,10 +71,10 @@ struct Renderer {
 }
 
 impl Renderer {
-    fn new(width: usize, palette: Palette) -> Self {
+    fn new(width: usize, theme: Theme) -> Self {
         Self {
             width,
-            palette,
+            theme,
             lines: vec![],
             spans: vec![],
             styles: vec![],
@@ -185,7 +144,7 @@ impl Renderer {
                 if self.table.is_some() {
                     self.push_text(&code);
                 } else {
-                    let style = self.style().patch(self.palette.code);
+                    let style = self.style().patch(self.theme.code);
                     self.spans
                         .push((Span::styled(code.to_string(), style), self.link));
                 }
@@ -202,7 +161,7 @@ impl Renderer {
                 self.start_block();
                 let rule = "─".repeat(self.width.saturating_sub(self.prefix_width()));
                 let mut spans = self.prefix(false);
-                spans.push(Span::styled(rule, self.palette.dim));
+                spans.push(Span::styled(rule, self.theme.muted));
                 self.lines.push(Line::from(spans));
                 self.need_gap = true;
             }
@@ -272,7 +231,7 @@ impl Renderer {
                 .styles
                 .push(Style::new().add_modifier(Modifier::CROSSED_OUT)),
             Tag::Link { dest_url, .. } => {
-                self.styles.push(self.palette.link);
+                self.styles.push(self.theme.link);
                 // Relative and anchor links lead nowhere from a terminal.
                 if dest_url.contains("://") {
                     // A control character would end the OSC 8 sequence early.
@@ -282,7 +241,7 @@ impl Renderer {
                 }
             }
             Tag::Image { .. } => {
-                self.styles.push(self.palette.dim);
+                self.styles.push(self.theme.muted);
                 self.push_text("[image: ");
             }
             _ => {}
@@ -338,9 +297,9 @@ impl Renderer {
 
     fn heading(&mut self, level: HeadingLevel) {
         let style = if level == HeadingLevel::H1 {
-            self.palette.title
+            self.theme.title
         } else {
-            self.palette.heading
+            self.theme.heading
         };
         let mut spans = std::mem::take(&mut self.spans);
         for (span, _) in &mut spans {
@@ -364,10 +323,10 @@ impl Renderer {
         let code = code.trim_end_matches('\n').replace('\t', "    ");
         let language = self.code_language.take();
         let source_lines = language
-            .and_then(|language| highlight(&code, &language, self.palette.syntax_theme))
+            .and_then(|language| highlight(&code, &language, self.theme.syntax))
             .unwrap_or_else(|| {
                 code.split('\n')
-                    .map(|line| vec![Span::styled(line.to_string(), self.palette.code_block)])
+                    .map(|line| vec![Span::styled(line.to_string(), self.theme.code_block)])
                     .collect()
             });
         let available = self.width.saturating_sub(self.prefix_width() + 2).max(1);
@@ -408,14 +367,14 @@ impl Renderer {
             .collect();
         for (row_index, row) in table.rows.iter().enumerate() {
             let style = if row_index < table.header_rows {
-                bold()
+                Style::new().add_modifier(Modifier::BOLD)
             } else {
                 Style::new()
             };
             let mut spans = self.prefix(false);
             for (column, width) in widths.iter().enumerate() {
                 if column > 0 {
-                    spans.push(Span::styled(" │ ", self.palette.dim));
+                    spans.push(Span::styled(" │ ", self.theme.muted));
                 }
                 let cell = row.get(column).map_or("", |cell| cell.trim());
                 spans.push(Span::styled(pad(&truncate(cell, *width), *width), style));
@@ -425,7 +384,7 @@ impl Renderer {
                 let separators: Vec<String> =
                     widths.iter().map(|width| "─".repeat(*width)).collect();
                 let mut spans = self.prefix(false);
-                spans.push(Span::styled(separators.join("─┼─"), self.palette.dim));
+                spans.push(Span::styled(separators.join("─┼─"), self.theme.muted));
                 self.lines.push(Line::from(spans));
             }
         }
@@ -453,12 +412,10 @@ impl Renderer {
             .iter()
             .enumerate()
             .filter_map(|(index, container)| match container {
-                Container::Quote => Some(Span::styled("│ ", self.palette.dim)),
+                Container::Quote => Some(Span::styled("│ ", self.theme.muted)),
                 Container::List(_) => None,
                 Container::Item(width) => match (&self.bullet, first && Some(index) == last_item) {
-                    (Some(bullet), true) => {
-                        Some(Span::styled(bullet.clone(), self.palette.heading))
-                    }
+                    (Some(bullet), true) => Some(Span::styled(bullet.clone(), self.theme.heading)),
                     _ => Some(Span::raw(" ".repeat(*width))),
                 },
             })
@@ -505,7 +462,7 @@ impl Renderer {
 
 /// Greedy word wrap. "\n" spans force a break, whitespace runs collapse to
 /// one space, and words wider than `width` are split.
-fn wrap(spans: Vec<Piece>, width: usize) -> Vec<Vec<Piece>> {
+pub(super) fn wrap(spans: Vec<Piece>, width: usize) -> Vec<Vec<Piece>> {
     let mut lines = vec![];
     let mut line: Vec<Piece> = vec![];
     let mut line_width = 0;
@@ -596,42 +553,60 @@ fn split_by_width(text: &str, width: usize) -> Vec<String> {
 }
 
 // Loaded on first use so the list still appears instantly at startup.
-static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-static THEMES: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
+
+/// Scope operations per line of a code block, by syntax name and code.
+/// Parsing is nearly all of highlighting's cost and doesn't depend on the
+/// theme, so a theme change or resize only restyles. Kept for the session,
+/// as bodies are.
+type Parsed = HashMap<(String, String), Vec<Vec<(usize, ScopeStackOp)>>>;
+static PARSED: LazyLock<Mutex<Parsed>> = LazyLock::new(Mutex::default);
 
 /// None for an unknown language or a highlighting failure, so the caller
 /// falls back to plain code styling.
 fn highlight(code: &str, language: &str, theme_name: &str) -> Option<Vec<Vec<Span<'static>>>> {
     let syntax = SYNTAXES.find_syntax_by_token(language)?;
-    let theme = THEMES.themes.get(theme_name)?;
-    let mut highlighter = HighlightLines::new(syntax, theme);
-    LinesWithEndings::from(code)
-        .map(|line| {
-            let regions = highlighter.highlight_line(line, &SYNTAXES).ok()?;
-            Some(
-                regions
-                    .into_iter()
-                    .map(|(style, text)| {
-                        // The theme's background is ignored so blocks sit on the
-                        // terminal's own background.
-                        let foreground = style.foreground;
-                        let mut span_style =
-                            Style::new().fg(Color::Rgb(foreground.r, foreground.g, foreground.b));
-                        if style.font_style.contains(FontStyle::BOLD) {
-                            span_style = span_style.add_modifier(Modifier::BOLD);
-                        }
-                        if style.font_style.contains(FontStyle::ITALIC) {
-                            span_style = span_style.add_modifier(Modifier::ITALIC);
-                        }
-                        if style.font_style.contains(FontStyle::UNDERLINE) {
-                            span_style = span_style.add_modifier(Modifier::UNDERLINED);
-                        }
-                        Span::styled(text.trim_end_matches('\n').to_string(), span_style)
-                    })
-                    .collect(),
-            )
+    let theme = SYNTAX_THEMES.themes.get(theme_name)?;
+    let mut parsed = PARSED.lock().ok()?;
+    let operations = match parsed.entry((syntax.name.clone(), code.to_string())) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            let mut state = ParseState::new(syntax);
+            let operations = LinesWithEndings::from(code)
+                .map(|line| state.parse_line(line, &SYNTAXES).ok())
+                .collect::<Option<_>>()?;
+            entry.insert(operations)
+        }
+    };
+    let highlighter = Highlighter::new(theme);
+    let mut state = HighlightState::new(&highlighter, ScopeStack::new());
+    let lines = LinesWithEndings::from(code)
+        .zip(operations.iter())
+        .map(|(line, operations)| {
+            HighlightIterator::new(&mut state, operations, line, &highlighter)
+                .map(|(style, text)| {
+                    // The theme's background is ignored so blocks sit on the
+                    // terminal's own background.
+                    let span_style = Style::new()
+                        .fg(terminal_color(style.foreground))
+                        .add_modifier(modifiers(style.font_style));
+                    Span::styled(text.trim_end_matches('\n').to_string(), span_style)
+                })
+                .collect()
         })
-        .collect()
+        .collect();
+    Some(lines)
+}
+
+fn modifiers(font_style: FontStyle) -> Modifier {
+    [
+        (FontStyle::BOLD, Modifier::BOLD),
+        (FontStyle::ITALIC, Modifier::ITALIC),
+        (FontStyle::UNDERLINE, Modifier::UNDERLINED),
+    ]
+    .into_iter()
+    .filter(|(font, _)| font_style.contains(*font))
+    .fold(Modifier::empty(), |all, (_, modifier)| all | modifier)
 }
 
 /// Hard-wraps one line of styled spans, keeping each piece's style.
@@ -682,9 +657,11 @@ fn pad(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+    use syntect::easy::HighlightLines;
 
     fn text(md: &str, width: usize) -> Vec<String> {
-        render(md, width, true)
+        render(md, width, &Theme::default_dark())
             .0
             .iter()
             .map(|line| line.to_string())
@@ -701,7 +678,7 @@ mod tests {
 
     #[test]
     fn wraps_words_and_preserves_styles() {
-        let (lines, _) = render("aaa **bbb** ccc ddd", 8, true);
+        let (lines, _) = render("aaa **bbb** ccc ddd", 8, &Theme::default_dark());
         let rendered: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert_eq!(rendered, ["aaa bbb", "ccc ddd"]);
         let bold = lines[0]
@@ -742,7 +719,7 @@ mod tests {
 
     #[test]
     fn known_language_is_highlighted() {
-        let (lines, _) = render("```rust\nfn main() {}\n```", 40, true);
+        let (lines, _) = render("```rust\nfn main() {}\n```", 40, &Theme::default_dark());
         assert_eq!(
             lines
                 .iter()
@@ -768,13 +745,85 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_theme_highlights() {
+        for (name, theme) in super::super::theme::ThemeConfig::default().themes() {
+            assert!(
+                highlight("fn main() {}", "rust", theme.syntax).is_some(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn highlighting_is_the_same_for_every_theme_and_repeat() {
+        // The comment spans lines, so parser state must carry across them.
+        let code = "/* a\n b */\nfn main() {\n    let s = \"x\";\n}";
+        for theme_name in ["base16-ocean.dark", "InspiredGitHub", "Dracula", "ansi"] {
+            let mut highlighter = HighlightLines::new(
+                SYNTAXES.find_syntax_by_token("rust").unwrap(),
+                &SYNTAX_THEMES.themes[theme_name],
+            );
+            let expected: Vec<Vec<(Style, String)>> = LinesWithEndings::from(code)
+                .map(|line| {
+                    let regions = highlighter.highlight_line(line, &SYNTAXES).unwrap();
+                    regions
+                        .into_iter()
+                        .map(|(style, text)| {
+                            (
+                                Style::new()
+                                    .fg(terminal_color(style.foreground))
+                                    .add_modifier(modifiers(style.font_style)),
+                                text.trim_end_matches('\n').to_string(),
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            for _ in 0..2 {
+                let actual: Option<Vec<Vec<(Style, String)>>> = highlight(code, "rust", theme_name)
+                    .map(|lines| {
+                        lines
+                            .into_iter()
+                            .map(|spans| {
+                                spans
+                                    .into_iter()
+                                    .map(|span| (span.style, span.content.into_owned()))
+                                    .collect()
+                            })
+                            .collect()
+                    });
+                assert_eq!(actual.as_ref(), Some(&expected), "{theme_name}");
+            }
+        }
+    }
+
+    #[test]
+    fn common_changelog_languages_are_highlighted() {
+        for language in [
+            "toml",
+            "ts",
+            "tsx",
+            "dockerfile",
+            "nix",
+            "zig",
+            "swift",
+            "kotlin",
+        ] {
+            assert!(
+                highlight("x = 1", language, "base16-ocean.dark").is_some(),
+                "{language}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_or_missing_language_stays_plain() {
         for markdown in ["```nosuchlang\nx = 1\n```", "```\nx = 1\n```", "    x = 1"] {
-            let (lines, _) = render(markdown, 40, true);
+            let (lines, _) = render(markdown, 40, &Theme::default_dark());
             assert_eq!(lines[0].to_string(), "  x = 1", "{markdown:?}");
             assert_eq!(
                 lines[0].spans[1].style,
-                Palette::new(true).code_block,
+                Theme::default_dark().code_block,
                 "{markdown:?}"
             );
         }
@@ -782,7 +831,11 @@ mod tests {
 
     #[test]
     fn highlighted_lines_wrap_and_keep_styles() {
-        let (lines, _) = render("```sh\necho aaaaaaaaaaaaaaaa\n```", 14, false);
+        let (lines, _) = render(
+            "```sh\necho aaaaaaaaaaaaaaaa\n```",
+            14,
+            &Theme::default_light(),
+        );
         let text: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert_eq!(text, ["  echo aaaaaaa", "  aaaaaaaaa"]);
         assert!(
@@ -807,7 +860,7 @@ mod tests {
         let (lines, links) = render(
             "[docs](https://d.io) and [#12](https://gh/pull/12)",
             80,
-            true,
+            &Theme::default_dark(),
         );
         assert_eq!(lines[0].to_string(), "docs and #12");
         assert_eq!(
@@ -821,7 +874,7 @@ mod tests {
 
     #[test]
     fn links_split_across_wrapped_lines_and_prefixes() {
-        let (lines, links) = render("- aaa [bb cc](https://x.io) dd", 8, true);
+        let (lines, links) = render("- aaa [bb cc](https://x.io) dd", 8, &Theme::default_dark());
         let text: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
         assert_eq!(text, ["• aaa bb", "  cc dd"]);
         assert_eq!(
@@ -832,10 +885,18 @@ mod tests {
 
     #[test]
     fn relative_links_and_control_characters_are_not_linked() {
-        assert_eq!(render("[x](docs/x.md) [y](#y)", 80, true).1, []);
+        assert_eq!(
+            render("[x](docs/x.md) [y](#y)", 80, &Theme::default_dark()).1,
+            []
+        );
         // An escape in the URL would otherwise end the OSC 8 sequence early.
         assert_eq!(
-            render("[z](<https://z.io/a\u{1b}\u{7}b>)", 80, true).1,
+            render(
+                "[z](<https://z.io/a\u{1b}\u{7}b>)",
+                80,
+                &Theme::default_dark()
+            )
+            .1,
             [link(0, 0..1, "https://z.io/ab")]
         );
     }

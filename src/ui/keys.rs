@@ -16,11 +16,12 @@ pub enum Action {
     OpenChangelog,
     UpgradeAll,
     UpgradeCurrent,
+    PickTheme,
     Help,
     Quit,
 }
 
-const DEFAULTS: [(&str, Action); 15] = [
+const DEFAULTS: [(&str, Action); 16] = [
     ("up", Action::MoveUp),
     ("K", Action::MoveUp),
     ("down", Action::MoveDown),
@@ -33,6 +34,7 @@ const DEFAULTS: [(&str, Action); 15] = [
     ("c", Action::OpenChangelog),
     ("a", Action::UpgradeAll),
     ("u", Action::UpgradeCurrent),
+    ("t", Action::PickTheme),
     ("?", Action::Help),
     ("q", Action::Quit),
     ("ctrl+c", Action::Quit),
@@ -81,23 +83,14 @@ impl Keymap {
     /// A bad file falls back to the defaults with warnings to print rather
     /// than failing startup.
     pub fn load() -> (Self, Vec<String>) {
-        match config_path() {
+        match config_path("keymap.json") {
             Some(path) => Self::load_from(&path),
             None => (Self::default(), vec![]),
         }
     }
 
     fn load_from(path: &Path) -> (Self, Vec<String>) {
-        match std::fs::read_to_string(path) {
-            Ok(data) => Self::default().merge(&data, path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Self::default(), vec![]),
-            Err(error) => (
-                Self::default(),
-                vec![format!(
-                    "keymap: could not read {path:?} ({error}), using defaults"
-                )],
-            ),
-        }
+        load_config(path, "keymap", |data| Self::default().merge(data, path))
     }
 
     #[cfg(test)]
@@ -147,12 +140,31 @@ impl Keymap {
 
 /// `$XDG_CONFIG_HOME` wins over the platform directory
 /// (`~/Library/Application Support` on macOS) so XDG users on macOS get it.
-fn config_path() -> Option<PathBuf> {
+pub(super) fn config_path(file: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(dirs::config_dir)?;
-    Some(base.join("brew-changes").join("keymap.json"))
+    Some(base.join("brew-changes").join(file))
+}
+
+/// A missing file is silent; an unreadable one warns. Either way the
+/// defaults are used.
+pub(super) fn load_config<T: Default>(
+    path: &Path,
+    label: &str,
+    parse: impl FnOnce(&str) -> (T, Vec<String>),
+) -> (T, Vec<String>) {
+    match std::fs::read_to_string(path) {
+        Ok(data) => parse(&data),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (T::default(), vec![]),
+        Err(error) => (
+            T::default(),
+            vec![format!(
+                "{label}: could not read {path:?} ({error}), using defaults"
+            )],
+        ),
+    }
 }
 
 /// Names follow the terminal convention used in keymap.json: "j", "K",

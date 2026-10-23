@@ -50,7 +50,8 @@ This will:
 | `c` | Open the highlighted package's changelog in your browser |
 | `a` | Quit and upgrade all outdated packages |
 | `u` | Upgrade just the highlighted package, in place |
-| `?` | Show the help/about popup |
+| `t` | Pick a theme, previewed live (not saved) |
+| `?` | Show the help/about popup; `l` there shows the bundled syntax and theme licences |
 | `q`, `Ctrl+C` | Quit without upgrading |
 
 If an in-place upgrade fails, the row shows `[upgrade failed]`; expand it to
@@ -75,8 +76,56 @@ Each entry maps a key name (`"j"`, `"K"`, `"ctrl+e"`, `"esc"`, `"enter"`,
 `"up"`, ...) to an action name, or to `null` to unbind it. Valid action
 names: `quit`, `move-up`, `move-down`, `move-up-or-scroll-up`,
 `move-down-or-scroll-down`, `toggle-expand`, `open-homepage`, `open-github`,
-`open-changelog`, `upgrade-all`, `upgrade-current`, `help`. The footer hints
+`open-changelog`, `upgrade-all`, `upgrade-current`, `pick-theme`, `help`. The footer hints
 and the help popup reflect your active bindings.
+
+#### Customizing colours
+
+Themes live in `theme.json`, next to `keymap.json`:
+
+```json
+{
+  "theme": { "dark": "Monokai Extended Origin", "light": "InspiredGitHub" },
+  "themes": {
+    "InspiredGitHub": { "link": { "fg": "#0366d6", "underline": false } },
+    "Solarized (dark)": { "border": "#586e75", "selected": { "reversed": true } },
+    "mine": { "syntax": "base16-mocha.dark", "accent": "#ff79c6" }
+  }
+}
+```
+
+`theme` is either one theme name, used regardless of the terminal background
+(and skipping the background query), or a `dark`/`light` pair picked by the
+detected background. Either half may be left out to keep its default.
+`brew changes --theme <name>` overrides it for one run, and `t` opens a
+picker that previews each theme live; neither is saved.
+
+The built-in themes are bat's, via [two-face](https://crates.io/crates/two-face):
+`base16-ocean.dark`, `base16-eighties.dark`,
+`base16-mocha.dark`, `base16-ocean.light`, `InspiredGitHub` (default light),
+`Solarized (dark)` and `Solarized (light)` first, then `ansi`, `base16`,
+`base16-256` (these three use the terminal's own colours), `Catppuccin
+Frappe`, `Catppuccin Latte`, `Catppuccin Macchiato`, `Catppuccin Mocha`,
+`Coldark-Cold`, `Coldark-Dark`, `DarkNeon`, `Dracula`, `GitHub`,
+`gruvbox-dark`, `gruvbox-light`, `1337`, `Monokai Extended` (plus `Bright`,
+`Light` and `Origin`, the default dark), `Nord`, `OneHalfDark`, `OneHalfLight`, `Sublime
+Snazzy`, `TwoDark` and `zenburn`.
+Each brings its own palette to the list, headings, links and code, matching
+its syntax highlighting (versions use the theme's number colour, for
+example). The first seven are hand-tuned; the rest are taken from each
+theme's own colours for strings, numbers, functions, comments and so on. Entries under `themes` override colours of a built-in theme, or
+define a new one whose `syntax` names the built-in it starts from and whose
+palette it inherits. Themes can be configured without being selected.
+
+Style keys: `accent`, `border`, `muted`, `error`, `version`, `heading`,
+`title`, `code`, `code-block`, `link`, `header` (the "Outdated packages:"
+heading and the name in the help popup), and `selected` (added to the
+highlighted row). `header` and `selected` are bold by default. Each is either a foreground colour or an
+object with any of `fg`, `bg`, `bold`, `dim`, `italic`, `underline`,
+`strikethrough` and `reversed`; only the attributes given change, so
+`{"bold": false}` keeps the default colour. Colours are names (`"red"`,
+`"lightblue"`), hex (`"#rrggbb"`) or a 256-colour index (`"39"`). Unknown keys
+or bad values are reported at startup and ignored.
 
 ## GitHub API rate limits
 
@@ -101,6 +150,7 @@ cargo run --bin validate-changelogs -- 100         # top 100 formulae
 cargo run --bin validate-changelogs -- 100 -cask   # top 100 casks
 cargo run --bin validate-changelogs -- -outdated   # this machine's outdated packages
 scripts/downgrade-for-testing.sh jq bat            # create real outdated packages
+scripts/run-with-fake-brew.sh [--theme <name>]    # the TUI with fake brew/GitHub (no real upgrades)
 ```
 
 ## Releasing

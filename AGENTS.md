@@ -37,6 +37,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 cargo run                                          # the TUI
 cargo run --bin validate-changelogs -- 100 [-cask] # resolution/fetch over real top packages
 cargo run --bin validate-changelogs -- -outdated
+scripts/run-with-fake-brew.sh [args]               # the TUI with a fake brew and local fake GitHub
 goreleaser release --snapshot --skip=publish --clean   # stages prebuilt/brew-changes-<target>/brew-changes (release.yml builds them)
 ```
 
