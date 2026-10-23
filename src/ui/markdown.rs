@@ -1,12 +1,13 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::Range;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::FontStyle;
-use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{FontStyle, HighlightIterator, HighlightState, Highlighter};
+use syntect::parsing::{ParseState, ScopeStack, ScopeStackOp, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -554,37 +555,58 @@ fn split_by_width(text: &str, width: usize) -> Vec<String> {
 // Loaded on first use so the list still appears instantly at startup.
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 
+/// Scope operations per line of a code block, by syntax name and code.
+/// Parsing is nearly all of highlighting's cost and doesn't depend on the
+/// theme, so a theme change or resize only restyles. Kept for the session,
+/// as bodies are.
+type Parsed = HashMap<(String, String), Vec<Vec<(usize, ScopeStackOp)>>>;
+static PARSED: LazyLock<Mutex<Parsed>> = LazyLock::new(Mutex::default);
+
 /// None for an unknown language or a highlighting failure, so the caller
 /// falls back to plain code styling.
 fn highlight(code: &str, language: &str, theme_name: &str) -> Option<Vec<Vec<Span<'static>>>> {
     let syntax = SYNTAXES.find_syntax_by_token(language)?;
     let theme = SYNTAX_THEMES.themes.get(theme_name)?;
-    let mut highlighter = HighlightLines::new(syntax, theme);
-    LinesWithEndings::from(code)
-        .map(|line| {
-            let regions = highlighter.highlight_line(line, &SYNTAXES).ok()?;
-            Some(
-                regions
-                    .into_iter()
-                    .map(|(style, text)| {
-                        // The theme's background is ignored so blocks sit on the
-                        // terminal's own background.
-                        let mut span_style = Style::new().fg(terminal_color(style.foreground));
-                        if style.font_style.contains(FontStyle::BOLD) {
-                            span_style = span_style.add_modifier(Modifier::BOLD);
-                        }
-                        if style.font_style.contains(FontStyle::ITALIC) {
-                            span_style = span_style.add_modifier(Modifier::ITALIC);
-                        }
-                        if style.font_style.contains(FontStyle::UNDERLINE) {
-                            span_style = span_style.add_modifier(Modifier::UNDERLINED);
-                        }
-                        Span::styled(text.trim_end_matches('\n').to_string(), span_style)
-                    })
-                    .collect(),
-            )
+    let mut parsed = PARSED.lock().ok()?;
+    let operations = match parsed.entry((syntax.name.clone(), code.to_string())) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            let mut state = ParseState::new(syntax);
+            let operations = LinesWithEndings::from(code)
+                .map(|line| state.parse_line(line, &SYNTAXES).ok())
+                .collect::<Option<_>>()?;
+            entry.insert(operations)
+        }
+    };
+    let highlighter = Highlighter::new(theme);
+    let mut state = HighlightState::new(&highlighter, ScopeStack::new());
+    let lines = LinesWithEndings::from(code)
+        .zip(operations.iter())
+        .map(|(line, operations)| {
+            HighlightIterator::new(&mut state, operations, line, &highlighter)
+                .map(|(style, text)| {
+                    // The theme's background is ignored so blocks sit on the
+                    // terminal's own background.
+                    let span_style = Style::new()
+                        .fg(terminal_color(style.foreground))
+                        .add_modifier(modifiers(style.font_style));
+                    Span::styled(text.trim_end_matches('\n').to_string(), span_style)
+                })
+                .collect()
         })
-        .collect()
+        .collect();
+    Some(lines)
+}
+
+fn modifiers(font_style: FontStyle) -> Modifier {
+    [
+        (FontStyle::BOLD, Modifier::BOLD),
+        (FontStyle::ITALIC, Modifier::ITALIC),
+        (FontStyle::UNDERLINE, Modifier::UNDERLINED),
+    ]
+    .into_iter()
+    .filter(|(font, _)| font_style.contains(*font))
+    .fold(Modifier::empty(), |all, (_, modifier)| all | modifier)
 }
 
 /// Hard-wraps one line of styled spans, keeping each piece's style.
@@ -636,6 +658,7 @@ fn pad(text: &str, width: usize) -> String {
 mod tests {
     use super::*;
     use ratatui::style::Color;
+    use syntect::easy::HighlightLines;
 
     fn text(md: &str, width: usize) -> Vec<String> {
         render(md, width, &Theme::default_dark())
@@ -728,6 +751,49 @@ mod tests {
                 highlight("fn main() {}", "rust", theme.syntax).is_some(),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn highlighting_is_the_same_for_every_theme_and_repeat() {
+        // The comment spans lines, so parser state must carry across them.
+        let code = "/* a\n b */\nfn main() {\n    let s = \"x\";\n}";
+        for theme_name in ["base16-ocean.dark", "InspiredGitHub", "Dracula", "ansi"] {
+            let mut highlighter = HighlightLines::new(
+                SYNTAXES.find_syntax_by_token("rust").unwrap(),
+                &SYNTAX_THEMES.themes[theme_name],
+            );
+            let expected: Vec<Vec<(Style, String)>> = LinesWithEndings::from(code)
+                .map(|line| {
+                    let regions = highlighter.highlight_line(line, &SYNTAXES).unwrap();
+                    regions
+                        .into_iter()
+                        .map(|(style, text)| {
+                            (
+                                Style::new()
+                                    .fg(terminal_color(style.foreground))
+                                    .add_modifier(modifiers(style.font_style)),
+                                text.trim_end_matches('\n').to_string(),
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            for _ in 0..2 {
+                let actual: Option<Vec<Vec<(Style, String)>>> = highlight(code, "rust", theme_name)
+                    .map(|lines| {
+                        lines
+                            .into_iter()
+                            .map(|spans| {
+                                spans
+                                    .into_iter()
+                                    .map(|span| (span.style, span.content.into_owned()))
+                                    .collect()
+                            })
+                            .collect()
+                    });
+                assert_eq!(actual.as_ref(), Some(&expected), "{theme_name}");
+            }
         }
     }
 
