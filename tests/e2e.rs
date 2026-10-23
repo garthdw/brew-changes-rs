@@ -322,6 +322,9 @@ async fn upgrade_current() -> Result<()> {
         .filter(|call| call.starts_with("upgrade"))
         .collect();
     assert_eq!(upgrades, ["upgrade e2e-tool"]);
+    session.send("q")?;
+    let screen = session.wait_exit().await?;
+    assert!(screen.contains("Upgraded 1 package(s)."), "{screen}");
     Ok(())
 }
 
