@@ -55,8 +55,9 @@ fn parse_outdated(json: &[u8]) -> Result<Vec<Package>> {
         serde_json::from_slice(json).context("parsing brew outdated output")?;
     let to_packages = |entries: Vec<OutdatedEntry>, is_cask| {
         entries.into_iter().map(move |entry| Package {
+            // brew lists kept kegs oldest first.
             installed: upstream_version(
-                entry.installed_versions.first().map_or("", String::as_str),
+                entry.installed_versions.last().map_or("", String::as_str),
                 is_cask,
             ),
             current: upstream_version(&entry.current_version, is_cask),
@@ -375,7 +376,7 @@ mod tests {
     fn outdated_parsing() {
         let raw = br#"{
             "formulae": [
-                {"name": "git", "installed_versions": ["2.40.0_1", "2.39.0"], "current_version": "2.41.0_2"},
+                {"name": "git", "installed_versions": ["2.39.0", "2.40.0_1"], "current_version": "2.41.0_2"},
                 {"name": "new", "installed_versions": [], "current_version": "1.0"}
             ],
             "casks": [{"name": "docker-desktop", "installed_versions": ["4.94.0,1"], "current_version": "4.95.0,242831"}]
