@@ -105,6 +105,15 @@ impl Client {
         }
         let response = request.send().await?;
         let status = response.status();
+        let rate_limited = response
+            .headers()
+            .get("x-ratelimit-remaining")
+            .is_some_and(|remaining| remaining == "0");
+        if rate_limited && matches!(status.as_u16(), 403 | 429) {
+            bail!(
+                "GET {url}: GitHub API rate limit exceeded; set GITHUB_TOKEN or run `gh auth login`"
+            );
+        }
         if status != reqwest::StatusCode::OK {
             bail!("GET {url}: status {}", status.as_u16());
         }
@@ -326,6 +335,38 @@ mod tests {
         assert_eq!(flaky.unwrap().0, "ok");
         let missing = client.fetch_raw(&format!("{}/missing", server.uri())).await;
         assert!(missing.is_err());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_is_explained() {
+        let server = MockServer::start().await;
+        Mock::given(path("/limited"))
+            .respond_with(ResponseTemplate::new(403).insert_header("x-ratelimit-remaining", "0"))
+            .mount(&server)
+            .await;
+        Mock::given(path("/forbidden"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let client = Client::for_test(&server.uri());
+        let error = |route: &'static str| {
+            let client = client.clone();
+            let url = format!("{}{route}", server.uri());
+            async move {
+                format!(
+                    "{:#}",
+                    client
+                        .get_json::<serde_json::Value>(&url)
+                        .await
+                        .unwrap_err()
+                )
+            }
+        };
+        let limited = error("/limited").await;
+        assert!(limited.contains("rate limit exceeded"), "{limited}");
+        assert!(limited.contains("GITHUB_TOKEN"), "{limited}");
+        let forbidden = error("/forbidden").await;
+        assert!(forbidden.ends_with("status 403"), "{forbidden}");
     }
 
     #[test]

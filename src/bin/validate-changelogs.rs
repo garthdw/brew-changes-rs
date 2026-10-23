@@ -228,6 +228,7 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
         }
         Changelog::Releases {
             fallback_file,
+            file_error,
             result,
         } => {
             outcome.source = "releases".into();
@@ -255,6 +256,9 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
                     }
                 },
             };
+            if let Some(error) = file_error {
+                outcome.note = format!("file fetch error: {error:#}; {}", outcome.note);
+            }
             if let Some(filename) = fallback_file {
                 outcome.note = format!("fell back from {filename}; {}", outcome.note);
             }

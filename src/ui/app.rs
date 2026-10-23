@@ -471,9 +471,9 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
             "The configured changelog is an HTML page that doesn't appear to document {}.\n\nKnown changelog: {manual}",
             item.current
         ),
-        Changelog::ManualFailed(_) => {
-            format!("Could not fetch the configured changelog URL.\n\nKnown changelog: {manual}")
-        }
+        Changelog::ManualFailed(error) => format!(
+            "Could not fetch the configured changelog URL.\n\n{error:#}\n\nKnown changelog: {manual}"
+        ),
         Changelog::Manual { section, .. } => format!("(from {manual})\n\n{section}"),
         Changelog::File {
             filename, section, ..
@@ -499,8 +499,22 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
             text
         }
         Changelog::Releases {
+            result: Err(error), ..
+        } => format!("Could not fetch GitHub releases.\n\n{error:#}"),
+        Changelog::Releases {
+            fallback_file,
+            file_error: Some(error),
+            ..
+        } => format!(
+            "Could not fetch {}, and no GitHub release matches {}.\n\n{error:#}",
+            fallback_file
+                .as_deref()
+                .unwrap_or("the repository's file listing"),
+            item.current
+        ),
+        Changelog::Releases {
             fallback_file: Some(filename),
-            result: Ok(_),
+            ..
         } => format!(
             "{filename} doesn't document {}, and no GitHub release matches it.",
             item.current
@@ -990,7 +1004,7 @@ mod tests {
         let err = Changelog::ManualFailed(anyhow::anyhow!("boom"));
         assert_eq!(
             changelog_body(&manual("https://m"), &err),
-            "Could not fetch the configured changelog URL.\n\nKnown changelog: https://m"
+            "Could not fetch the configured changelog URL.\n\nboom\n\nKnown changelog: https://m"
         );
 
         let html = Changelog::ManualHtmlWithoutVersion;
@@ -1021,6 +1035,7 @@ mod tests {
 
         let empty = Changelog::Releases {
             fallback_file: None,
+            file_error: None,
             result: Ok(Releases::default()),
         };
         assert_eq!(
@@ -1040,6 +1055,7 @@ mod tests {
         );
         let undocumented = Changelog::Releases {
             fallback_file: Some("CHANGELOG.md".into()),
+            file_error: None,
             result: Ok(Releases::default()),
         };
         assert_eq!(
@@ -1048,12 +1064,27 @@ mod tests {
         );
         let failed = Changelog::Releases {
             fallback_file: None,
+            file_error: None,
             result: Err(anyhow::anyhow!("boom")),
         };
         assert_eq!(
             changelog_body(&pre, &failed),
-            "No changelog file or GitHub releases found for this package."
+            "Could not fetch GitHub releases.\n\nboom"
         );
+        for (fallback_file, what) in [
+            (Some("CHANGELOG.md"), "CHANGELOG.md"),
+            (None, "the repository's file listing"),
+        ] {
+            let unreadable = Changelog::Releases {
+                fallback_file: fallback_file.map(String::from),
+                file_error: Some(anyhow::anyhow!("boom")),
+                result: Ok(Releases::default()),
+            };
+            assert_eq!(
+                changelog_body(&items(1)[0], &unreadable),
+                format!("Could not fetch {what}, and no GitHub release matches 2.0.\n\nboom")
+            );
+        }
     }
 
     #[test]
@@ -1072,6 +1103,7 @@ mod tests {
             .collect();
         let changelog = Changelog::Releases {
             fallback_file: None,
+            file_error: None,
             result: Ok(Releases { list, found: true }),
         };
         let body = changelog_body(&Item::default(), &changelog);
