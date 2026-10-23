@@ -28,7 +28,7 @@
 
 # Project
 
-`brew-changes` (`brew changes`) is a ratatui TUI that shows the changelog section between the installed and current versions of every outdated Homebrew formula/cask, then upgrades all or one of them. It is a rewrite of the Go version in `../brew-changes`; `docs/PRD.md` is the behavioural spec and parity checklist.
+`brew-changes` (`brew changes`) is a ratatui TUI that shows the changelog section between the installed and current versions of every outdated Homebrew formula/cask, then upgrades all or one of them. It is a rewrite of the Go version in `../brew-changes`.
 
 ## Commands
 

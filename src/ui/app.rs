@@ -470,7 +470,6 @@ fn body_markdown(item: &Item) -> Option<String> {
     Some(failure + item.body.as_deref().unwrap_or_default())
 }
 
-/// PRD FR-10.2.
 pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
     let manual = &item.source.manual_url;
     match changelog {
