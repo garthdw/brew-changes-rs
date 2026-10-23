@@ -139,6 +139,8 @@ pub enum Popup {
     /// The highlighted theme's index, applied as a preview; cancelling
     /// restores `active`. Nothing is saved.
     Theme(usize),
+    /// Asked before quitting while an upgrade runs.
+    ConfirmQuit,
 }
 
 /// Lines are only rebuilt when their inputs change, since bodies can run to
@@ -242,6 +244,13 @@ impl App {
                 self.popup = self.licences_key(key, offset).map(Popup::Licences);
             }
             Some(Popup::Theme(selected)) => self.theme_picker_key(key, selected),
+            // A repeated quit key confirms, so ctrl+c twice always exits.
+            Some(Popup::ConfirmQuit)
+                if key == "y" || self.keymap.lookup(key) == Some(Action::Quit) =>
+            {
+                self.outcome = Some(Outcome::Quit);
+            }
+            Some(Popup::ConfirmQuit) => {}
             None => return self.main_key(key),
         }
         vec![]
@@ -254,8 +263,9 @@ impl App {
         match action {
             Action::Help => self.popup = Some(Popup::Help),
             Action::PickTheme => self.popup = Some(Popup::Theme(self.active)),
-            // Exiting would orphan the running `brew upgrade` mid-install.
-            Action::Quit | Action::UpgradeAll if self.upgrading() => {
+            // Exiting could interrupt the running `brew upgrade` mid-install.
+            Action::Quit if self.upgrading() => self.popup = Some(Popup::ConfirmQuit),
+            Action::UpgradeAll if self.upgrading() => {
                 self.notice = Some(UPGRADE_RUNNING.into());
             }
             Action::Quit => self.outcome = Some(Outcome::Quit),
@@ -784,6 +794,7 @@ mod tests {
         app.items[1].upgrade = Upgrade::Running;
         key(&mut app, "a");
         assert_eq!(app.outcome, None);
+        assert_eq!(app.notice.as_deref(), Some(UPGRADE_RUNNING));
         app.items[1].upgrade = Upgrade::Idle;
         key(&mut app, "a");
         assert_eq!(app.outcome, Some(Outcome::UpgradeAll));
@@ -874,13 +885,24 @@ mod tests {
     }
 
     #[test]
-    fn quit_is_blocked_while_upgrading() {
-        for k in ["q", "ctrl+c", "a"] {
+    fn quit_while_upgrading_asks_first() {
+        for (first, confirm) in [("q", "y"), ("q", "q"), ("ctrl+c", "ctrl+c")] {
             let mut app = ready(items(2));
             app.items[1].upgrade = Upgrade::Running;
-            key(&mut app, k);
-            assert_eq!(app.outcome, None, "{k}");
-            assert_eq!(app.notice.as_deref(), Some(UPGRADE_RUNNING), "{k}");
+            key(&mut app, first);
+            assert_eq!(app.popup, Some(Popup::ConfirmQuit), "{first}");
+            assert_eq!(app.outcome, None, "{first}");
+            key(&mut app, confirm);
+            assert_eq!(app.outcome, Some(Outcome::Quit), "{first} {confirm}");
+        }
+        for cancel in ["n", "esc", "enter"] {
+            let mut app = ready(items(2));
+            app.items[1].upgrade = Upgrade::Running;
+            key(&mut app, "q");
+            key(&mut app, cancel);
+            assert_eq!(app.popup, None, "{cancel}");
+            assert_eq!(app.outcome, None, "{cancel}");
+            assert!(!app.items[0].expanded, "{cancel}");
         }
     }
 
