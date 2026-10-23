@@ -45,7 +45,11 @@ pub async fn outdated() -> Result<Vec<Package>> {
         .await
         .context("brew outdated")?;
     if !output.status.success() {
-        bail!("brew outdated: {}", output.status);
+        bail!(
+            "brew outdated: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
     parse_outdated(&output.stdout)
 }
