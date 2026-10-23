@@ -29,7 +29,7 @@ pub async fn run(
     active: usize,
     client: Client,
 ) -> Result<(Outcome, Vec<Item>)> {
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init().context("initialising the terminal")?;
     let result = event_loop(
         &mut terminal,
         App::new(items, keymap, themes, active),
