@@ -2,7 +2,8 @@ use std::cmp::Ordering;
 
 use serde::Deserialize;
 
-use crate::{template, version};
+use crate::template::Heading;
+use crate::version;
 
 pub const MAX_CONTENT_LINES: usize = 100;
 
@@ -101,14 +102,15 @@ fn trim_by_release(
     heading: &str,
     order: Order,
 ) -> Section {
+    let heading = Heading::parse(heading);
     let releases: Vec<(usize, &str)> = lines
         .iter()
         .enumerate()
-        .filter_map(|(index, line)| Some((index, template::heading_version(heading, line)?)))
+        .filter_map(|(index, line)| Some((index, heading.version(line)?)))
         .collect();
-    let target = template::version_text(heading, new_version).unwrap_or_default();
+    let target = heading.version_text(new_version).unwrap_or_default();
     let installed = (!installed.is_empty())
-        .then(|| template::version_text(heading, installed))
+        .then(|| heading.version_text(installed))
         .flatten();
     let Some(target_index) = releases.iter().position(|(_, version)| *version == target) else {
         return not_found(lines);
@@ -166,9 +168,8 @@ fn find_heading(lines: &[&str], version: Option<&str>, heading: &str) -> Option<
         return None;
     }
     if !heading.is_empty() {
-        return lines
-            .iter()
-            .position(|line| template::heading_matches(heading, line, version));
+        let heading = Heading::parse(heading);
+        return lines.iter().position(|line| heading.matches(line, version));
     }
     let version = version?;
     version::line_matchers(version)

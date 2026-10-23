@@ -46,7 +46,7 @@ fn brew_shim(test: &str, outdated: Value) -> Result<PathBuf> {
     )?;
     fs::write(
         dir.join("info-cask.json"),
-        json!({"casks": [{"full_token": "e2e-app", "homepage": "https://example.com"}]})
+        json!({"casks": [{"token": "e2e-app", "full_token": "someuser/tap/e2e-app", "homepage": "https://example.com"}]})
             .to_string(),
     )?;
     let shim = dir.join("bin/brew");
@@ -322,6 +322,9 @@ async fn upgrade_current() -> Result<()> {
         .filter(|call| call.starts_with("upgrade"))
         .collect();
     assert_eq!(upgrades, ["upgrade e2e-tool"]);
+    session.send("q")?;
+    let screen = session.wait_exit().await?;
+    assert!(screen.contains("Upgraded 1 package(s)."), "{screen}");
     Ok(())
 }
 

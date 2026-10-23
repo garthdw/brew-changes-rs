@@ -83,25 +83,36 @@ pub fn expand(template: &str, version: &str) -> String {
         .collect()
 }
 
-/// Matches the whole line, trimmed and without a leading ATX `#` marker, since
-/// HTML pages are converted to Markdown. `None` matches any version, to find
-/// where a section ends when there's no installed version to stop at.
-pub fn heading_matches(template: &str, line: &str, version: Option<&str>) -> bool {
-    match_line(&tokens(template), heading_text(line), version).is_some()
-}
+/// A heading template, parsed once since it's matched against every line of
+/// a changelog.
+pub struct Heading<'a>(Vec<Token<'a>>);
 
-/// The version a heading names, as written by its first placeholder.
-pub fn heading_version<'line>(template: &str, line: &'line str) -> Option<&'line str> {
-    match_line(&tokens(template), heading_text(line), None).flatten()
-}
+impl<'a> Heading<'a> {
+    pub fn parse(template: &'a str) -> Self {
+        Self(tokens(template))
+    }
 
-/// `version` as the template's first placeholder writes it, to compare with
-/// `heading_version`.
-pub fn version_text(template: &str, version: &str) -> Option<String> {
-    tokens(template)
-        .into_iter()
-        .find(|token| matches!(token, Token::Whole | Token::Parts { .. }))
-        .map(|token| render(token, version))
+    /// Matches the whole line, trimmed and without a leading ATX `#` marker,
+    /// since HTML pages are converted to Markdown. `None` matches any version,
+    /// to find where a section ends when there's no installed version to stop
+    /// at.
+    pub fn matches(&self, line: &str, version: Option<&str>) -> bool {
+        match_line(&self.0, heading_text(line), version).is_some()
+    }
+
+    /// The version a heading names, as written by its first placeholder.
+    pub fn version<'line>(&self, line: &'line str) -> Option<&'line str> {
+        match_line(&self.0, heading_text(line), None).flatten()
+    }
+
+    /// `version` as the template's first placeholder writes it, to compare
+    /// with `version`.
+    pub fn version_text(&self, version: &str) -> Option<String> {
+        self.0
+            .iter()
+            .find(|token| matches!(token, Token::Whole | Token::Parts { .. }))
+            .map(|&token| render(token, version))
+    }
 }
 
 fn heading_text(line: &str) -> &str {
@@ -252,7 +263,7 @@ mod tests {
         ];
         for (template, line, version, want) in cases {
             assert_eq!(
-                heading_matches(template, line, Some(version)),
+                Heading::parse(template).matches(line, Some(version)),
                 want,
                 "{template:?} on {line:?} for {version:?}"
             );
@@ -283,7 +294,7 @@ mod tests {
         ];
         for (template, line, want) in cases {
             assert_eq!(
-                heading_version(template, line),
+                Heading::parse(template).version(line),
                 want,
                 "{template:?} on {line:?}"
             );
@@ -293,14 +304,18 @@ mod tests {
     #[test]
     fn version_text_cases() {
         assert_eq!(
-            version_text("go{version} ({*}", "1.27.2").as_deref(),
+            Heading::parse("go{version} ({*}")
+                .version_text("1.27.2")
+                .as_deref(),
             Some("1.27.2")
         );
         assert_eq!(
-            version_text("[v{major.minor}]({*}", "2.8.1").as_deref(),
+            Heading::parse("[v{major.minor}]({*}")
+                .version_text("2.8.1")
+                .as_deref(),
             Some("2.8")
         );
-        assert_eq!(version_text("no placeholder", "2.8.1"), None);
+        assert_eq!(Heading::parse("no placeholder").version_text("2.8.1"), None);
     }
 
     #[test]
@@ -323,7 +338,7 @@ mod tests {
         ];
         for (template, line, want) in cases {
             assert_eq!(
-                heading_matches(template, line, None),
+                Heading::parse(template).matches(line, None),
                 want,
                 "{template:?} on {line:?}"
             );

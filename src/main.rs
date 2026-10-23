@@ -73,7 +73,14 @@ async fn run_app() -> Result<()> {
     let (outcome, items) = run(items, keymap, themes, active, Client::new()?).await?;
 
     if outcome != Outcome::UpgradeAll {
-        println!("No packages upgraded.");
+        match items
+            .iter()
+            .filter(|item| item.upgrade == Upgrade::Done)
+            .count()
+        {
+            0 => println!("No packages upgraded."),
+            upgraded => println!("Upgraded {upgraded} package(s)."),
+        }
         return Ok(());
     }
     let (casks, formulae): (Vec<Item>, Vec<Item>) = items

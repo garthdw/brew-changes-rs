@@ -1,9 +1,5 @@
 use std::cmp::Ordering;
 
-pub fn shorten(version: &str, parts: usize) -> String {
-    version.split('.').take(parts).collect::<Vec<_>>().join(".")
-}
-
 /// `allow_longer` lets "3.1" match inside "3.1.0", because brew's version is
 /// sometimes less precise than a changelog heading.
 pub fn in_line(line: &str, version: &str, allow_longer: bool) -> bool {

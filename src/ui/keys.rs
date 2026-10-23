@@ -172,7 +172,7 @@ pub(super) fn load_config<T: Default>(
 pub fn key_name(event: &KeyEvent) -> String {
     let base = match event.code {
         KeyCode::Char(' ') => "space".into(),
-        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Char(character) => character.to_string(),
         KeyCode::Enter => "enter".into(),
         KeyCode::Esc => "esc".into(),
         KeyCode::Tab => "tab".into(),
@@ -210,7 +210,7 @@ pub fn glyph(key: &str) -> &str {
     match key {
         "up" => "↑",
         "down" => "↓",
-        k => k,
+        other => other,
     }
 }
 

@@ -353,6 +353,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 format!("[{}] keep  [esc] cancel  (not saved)", keys::glyph(keep)),
             );
         }
+        Some(Popup::ConfirmQuit) => draw_popup(
+            frame,
+            app,
+            "Quit?",
+            vec![
+                Line::raw("An upgrade is still running;"),
+                Line::raw("quitting now may interrupt it mid-install."),
+            ],
+            Scroll::From(0),
+            "[y] quit  any other key: keep waiting".into(),
+        ),
     }
 }
 

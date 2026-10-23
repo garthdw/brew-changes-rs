@@ -102,7 +102,8 @@ impl Client {
                 .await
                 && matches_tag(&latest.tag_name, target)
             {
-                filtered.push(latest);
+                // The list is newest first and holds only releases older than the target.
+                filtered.insert(0, latest);
                 return filtered;
             }
             [format!("v{target}"), target.to_string()]
@@ -384,7 +385,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn target_missing_from_list_but_latest_is_appended() {
+    async fn target_missing_from_list_but_latest_is_prepended() {
+        let (server, client) = setup().await;
+        serve(&server, "/repos/o/r/releases/latest", tag("v4.6.7")).await;
+        serve(
+            &server,
+            "/repos/o/r/releases",
+            [tag("v4.6.6"), tag("v4.6.5")],
+        )
+        .await;
+        let got = client
+            .fetch_releases("o", "r", "4.6.5", "4.6.7", false)
+            .await
+            .unwrap();
+        assert_eq!(tags(&got), ["v4.6.7", "v4.6.6"]);
+    }
+
+    #[tokio::test]
+    async fn target_missing_from_list_but_latest_is_found() {
         let (server, client) = setup().await;
         serve(&server, "/repos/o/r/releases/latest", tag("v4.6.7")).await;
         serve(

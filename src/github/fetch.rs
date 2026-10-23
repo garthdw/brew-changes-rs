@@ -34,6 +34,9 @@ pub enum Changelog {
         /// The changelog file that didn't document the version, so the UI can
         /// still link to it.
         fallback_file: Option<String>,
+        /// Why the changelog file couldn't be listed or fetched, so an
+        /// outage isn't mistaken for the file not documenting the version.
+        file_error: Option<anyhow::Error>,
         result: Result<Releases>,
     },
 }
@@ -96,34 +99,43 @@ impl Client {
         }
 
         let mut fallback_file = None;
-        // A failed listing is treated as "no file"; releases may still work.
-        if let Ok(Some(filename)) = self
+        let mut file_error = None;
+        // A failed listing or file fetch still tries releases, which may work.
+        match self
             .resolve_changelog_filename(&source.owner, &source.repo)
             .await
         {
-            on_stage(Stage::File(filename.clone()));
-            if let Ok(content) = self
-                .fetch_github_file(&source.owner, &source.repo, &filename, None)
-                .await
-                && let Section {
-                    text: section,
-                    found: true,
-                    end,
-                } = trim_to_range(
-                    &content,
-                    &current,
-                    &installed,
-                    &source.heading,
-                    source.order,
-                )
-            {
-                return Changelog::File {
-                    filename,
-                    section,
-                    end,
-                };
+            Ok(Some(filename)) => {
+                on_stage(Stage::File(filename.clone()));
+                match self
+                    .fetch_github_file(&source.owner, &source.repo, &filename, None)
+                    .await
+                {
+                    Ok(content) => {
+                        if let Section {
+                            text: section,
+                            found: true,
+                            end,
+                        } = trim_to_range(
+                            &content,
+                            &current,
+                            &installed,
+                            &source.heading,
+                            source.order,
+                        ) {
+                            return Changelog::File {
+                                filename,
+                                section,
+                                end,
+                            };
+                        }
+                    }
+                    Err(error) => file_error = Some(error),
+                }
+                fallback_file = Some(filename);
             }
-            fallback_file = Some(filename);
+            Ok(None) => {}
+            Err(error) => file_error = Some(error),
         }
 
         on_stage(Stage::Releases);
@@ -144,6 +156,7 @@ impl Client {
             });
         Changelog::Releases {
             fallback_file,
+            file_error,
             result,
         }
     }
@@ -300,6 +313,7 @@ mod tests {
             Changelog::Releases {
                 fallback_file,
                 result: Ok(releases),
+                ..
             } => (fallback_file, releases),
             other => panic!("not releases: {other:?}"),
         }
@@ -624,9 +638,46 @@ mod tests {
         )
         .await;
         let got = client.fetch(&repo(), "1.0.0", "2.0.0", |_| {}).await;
-        let (fallback_file, releases) = releases(got);
-        assert!(releases.found);
-        assert_eq!(fallback_file, None);
+        let Changelog::Releases {
+            fallback_file: None,
+            file_error: Some(_),
+            result: Ok(Releases { found: true, .. }),
+        } = got
+        else {
+            panic!("expected found releases with a listing error: {got:?}");
+        };
+    }
+
+    #[tokio::test]
+    async fn fetch_file_error_is_kept_for_the_ui() {
+        let (server, client) = setup().await;
+        serve(&server, "/repos/o/r/contents/", listing(&["CHANGELOG.md"])).await;
+        for route in [
+            "/repos/o/r/contents/CHANGELOG.md",
+            "/raw/o/r/HEAD/CHANGELOG.md",
+        ] {
+            Mock::given(path(route))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+        }
+        serve(
+            &server,
+            "/repos/o/r/releases",
+            json!([{"tag_name": "v1.0.0"}]),
+        )
+        .await;
+        let got = client.fetch(&repo(), "1.0.0", "2.0.0", |_| {}).await;
+        let Changelog::Releases {
+            fallback_file: Some(filename),
+            file_error: Some(error),
+            result: Ok(_),
+        } = got
+        else {
+            panic!("expected a file error: {got:?}");
+        };
+        assert_eq!(filename, "CHANGELOG.md");
+        assert!(format!("{error:#}").contains("status 500"), "{error:#}");
     }
 
     #[tokio::test]
