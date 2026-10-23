@@ -1,11 +1,12 @@
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use brew_changes::github::{Client, resolve_source};
 use brew_changes::homebrew::{self, brew_info_runner};
 use brew_changes::ui::app::{Item, Outcome, Upgrade};
 use brew_changes::ui::keys::Keymap;
 use brew_changes::ui::run::{detect_dark_background, run};
+use brew_changes::ui::theme::ThemeConfig;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -23,6 +24,20 @@ async fn main() -> ExitCode {
 }
 
 async fn run_app() -> Result<()> {
+    // Read before the slow brew calls so a typo fails fast.
+    let (mut theme_config, theme_warnings) = ThemeConfig::load();
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        let theme = match argument.strip_prefix("--theme=") {
+            Some(theme) => theme.to_string(),
+            None if argument == "--theme" => {
+                arguments.next().context("--theme needs a theme name")?
+            }
+            None => bail!("unknown argument {argument:?}, expected --theme <name> or --version"),
+        };
+        theme_config.select(&theme)?;
+    }
+
     println!("Checking for outdated packages...");
 
     let packages = homebrew::outdated().await?;
@@ -51,11 +66,11 @@ async fn run_app() -> Result<()> {
         .collect();
 
     let (keymap, warnings) = Keymap::load();
-    for warning in warnings {
+    for warning in warnings.into_iter().chain(theme_warnings) {
         eprintln!("{warning}");
     }
-    let dark = detect_dark_background();
-    let (outcome, items) = run(items, keymap, dark, Client::new()?).await?;
+    let (themes, active) = theme_config.resolve(detect_dark_background);
+    let (outcome, items) = run(items, keymap, themes, active, Client::new()?).await?;
 
     if outcome != Outcome::UpgradeAll {
         println!("No packages upgraded.");

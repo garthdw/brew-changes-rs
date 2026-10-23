@@ -240,6 +240,27 @@ fn nothing_outdated() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn unknown_theme_flag_fails_before_brew() -> Result<()> {
+    let dir = brew_shim("unknown_theme_flag_fails_before_brew", two_outdated())?;
+    let output = Command::new(BIN)
+        .args(["--theme", "nope"])
+        .env_clear()
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", dir.join("bin").display()),
+        )
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .envs(profile_file().map(|file| ("LLVM_PROFILE_FILE", file)))
+        .output()?;
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown theme \"nope\""), "{stderr}");
+    assert!(stderr.contains("InspiredGitHub"), "{stderr}");
+    assert!(!dir.join("calls.log").exists());
+    Ok(())
+}
+
 #[tokio::test]
 async fn lists_and_expands_changelog() -> Result<()> {
     let dir = brew_shim("lists_and_expands_changelog", two_outdated())?;
@@ -262,6 +283,28 @@ async fn lists_and_expands_changelog() -> Result<()> {
         "{:?}",
         calls(&dir)?
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn theme_file_sets_colours() -> Result<()> {
+    let dir = brew_shim("theme_file_sets_colours", two_outdated())?;
+    fs::create_dir_all(dir.join("config/brew-changes"))?;
+    fs::write(
+        dir.join("config/brew-changes/theme.json"),
+        json!({
+            "theme": "mine",
+            "themes": {"mine": {"syntax": "InspiredGitHub", "accent": "201", "version": "#123456"}}
+        })
+        .to_string(),
+    )?;
+    let github = mock_github().await;
+    let session = Session::start("theme_file_sets_colours", &dir, &github)?;
+
+    session.wait_for("e2e-app").await?;
+    let screen = session.tmux(&["capture-pane", "-p", "-e", "-t", "e2e"])?;
+    assert!(screen.contains("\x1b[38;5;201m> "), "{screen:?}");
+    assert!(screen.contains("\x1b[38;2;18;52;86m1.0.0"), "{screen:?}");
     Ok(())
 }
 

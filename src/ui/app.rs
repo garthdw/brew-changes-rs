@@ -4,11 +4,12 @@ use ratatui::text::Line;
 
 use super::keys::{Action, Keymap};
 use super::markdown::Link;
+use super::theme::Theme;
 use super::{markdown, view};
 use crate::github::{Changelog, Releases, Source, Stage};
 
 const HEADER_LINES: u16 = 2;
-const FOOTER_LINES: u16 = 2;
+pub(super) const FOOTER_LINES: u16 = 2;
 const MAX_DISPLAYED_RELEASES: usize = 10;
 const MAX_BODY_WIDTH: usize = 96;
 // Frame margin, border and padding around a body.
@@ -109,8 +110,13 @@ pub struct App {
     pub items: Vec<Item>,
     pub cursor: usize,
     pub keymap: Keymap,
-    pub dark: bool,
-    pub show_help: bool,
+    pub theme: Theme,
+    /// Every theme the picker offers, by name.
+    pub themes: Vec<(String, Theme)>,
+    /// The kept theme's index in `themes`, tracked rather than found by value
+    /// as a custom theme can equal the built-in it starts from.
+    pub active: usize,
+    pub popup: Option<Popup>,
     /// Shown in place of the footer hints until the next key press.
     pub notice: Option<String>,
     pub outcome: Option<Outcome>,
@@ -125,6 +131,16 @@ pub struct App {
     body_cache: HashMap<usize, Body>,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum Popup {
+    Help,
+    /// The scroll offset.
+    Licences(usize),
+    /// The highlighted theme's index, applied as a preview; cancelling
+    /// restores `active`. Nothing is saved.
+    Theme(usize),
+}
+
 /// Lines are only rebuilt when their inputs change, since bodies can run to
 /// thousands of lines and `refresh` runs on every tick while busy. Entries are
 /// removed wherever an item's body or upgrade failure changes.
@@ -137,13 +153,22 @@ struct Body {
 }
 
 impl App {
-    pub fn new(items: Vec<Item>, keymap: Keymap, dark: bool) -> Self {
+    pub fn new(
+        items: Vec<Item>,
+        keymap: Keymap,
+        themes: Vec<(String, Theme)>,
+        active: usize,
+    ) -> Self {
         Self {
             items,
             cursor: 0,
             keymap,
-            dark,
-            show_help: false,
+            theme: themes
+                .get(active)
+                .map_or_else(Theme::default_dark, |&(_, theme)| theme),
+            themes,
+            active,
+            popup: None,
             notice: None,
             outcome: None,
             width: 0,
@@ -210,14 +235,25 @@ impl App {
     }
 
     fn key(&mut self, key: &str) -> Vec<Effect> {
-        if std::mem::take(&mut self.show_help) {
-            return vec![];
+        match self.popup.take() {
+            Some(Popup::Help) if key == "l" => self.popup = Some(Popup::Licences(0)),
+            Some(Popup::Help) => {}
+            Some(Popup::Licences(offset)) => {
+                self.popup = self.licences_key(key, offset).map(Popup::Licences);
+            }
+            Some(Popup::Theme(selected)) => self.theme_picker_key(key, selected),
+            None => return self.main_key(key),
         }
+        vec![]
+    }
+
+    fn main_key(&mut self, key: &str) -> Vec<Effect> {
         let Some(action) = self.keymap.lookup(key) else {
             return vec![];
         };
         match action {
-            Action::Help => self.show_help = true,
+            Action::Help => self.popup = Some(Popup::Help),
+            Action::PickTheme => self.popup = Some(Popup::Theme(self.active)),
             // Exiting would orphan the running `brew upgrade` mid-install.
             Action::Quit | Action::UpgradeAll if self.upgrading() => {
                 self.notice = Some(UPGRADE_RUNNING.into());
@@ -227,6 +263,53 @@ impl App {
             _ => return self.item_key(action),
         }
         vec![]
+    }
+
+    /// Quit cancels rather than exiting, as the picker is a modal.
+    fn theme_picker_key(&mut self, key: &str, mut selected: usize) {
+        let action = self.keymap.lookup(key);
+        match action {
+            Some(Action::MoveUp | Action::MoveUpOrScrollUp) => {
+                selected = selected.saturating_sub(1);
+            }
+            Some(Action::MoveDown | Action::MoveDownOrScrollDown) => {
+                selected = (selected + 1).min(self.themes.len().saturating_sub(1));
+            }
+            Some(Action::ToggleExpand) => return self.active = selected,
+            Some(Action::Quit | Action::PickTheme) => return self.preview(self.active),
+            _ if key == "esc" => return self.preview(self.active),
+            _ => {}
+        }
+        self.preview(selected);
+        self.popup = Some(Popup::Theme(selected));
+    }
+
+    /// The new scroll offset, or None once closed. Scrolling stops when the
+    /// last line is in view, so scrolling back up responds straight away.
+    fn licences_key(&self, key: &str, offset: usize) -> Option<usize> {
+        // Popups stop above the footer.
+        let page = usize::from((self.height + HEADER_LINES).saturating_sub(view::POPUP_CHROME));
+        let offset = match (self.keymap.lookup(key), key) {
+            (Some(Action::Quit | Action::Help), _) | (_, "esc") => return None,
+            (Some(Action::MoveUp | Action::MoveUpOrScrollUp), _) => offset.saturating_sub(1),
+            (Some(Action::MoveDown | Action::MoveDownOrScrollDown), _) => offset + 1,
+            (_, "pgup") => offset.saturating_sub(page),
+            (_, "pgdown" | "space") => offset + page,
+            _ => offset,
+        };
+        Some(offset.min(view::LICENCES.len().saturating_sub(page)))
+    }
+
+    /// Cached bodies hold styled lines, so they're rebuilt in the new theme.
+    fn preview(&mut self, index: usize) {
+        let Some(&(_, theme)) = self.themes.get(index) else {
+            return;
+        };
+        if theme != self.theme {
+            self.theme = theme;
+            self.body_cache.clear();
+            self.refresh();
+        }
     }
 
     fn upgrading(&self) -> bool {
@@ -278,7 +361,7 @@ impl App {
                 self.scroll_to_cursor();
                 return vec![Effect::Upgrade(cursor)];
             }
-            Action::Help | Action::Quit | Action::UpgradeAll => {}
+            Action::Help | Action::Quit | Action::UpgradeAll | Action::PickTheme => {}
         }
         vec![]
     }
@@ -330,8 +413,9 @@ impl App {
             // re-rendering it for each spinner frame is cheap.
             if body.framed.is_empty() || body.wrap != wrap || body.loading || loading.is_some() {
                 let source = body_markdown(item).unwrap_or_default();
-                let (lines, links) = markdown::render(&source, wrap, self.dark);
-                (body.framed, body.links) = view::frame_body(lines, links, loading, self.spinner);
+                let (lines, links) = markdown::render(&source, wrap, &self.theme);
+                (body.framed, body.links) =
+                    view::frame_body(lines, links, loading, self.spinner, &self.theme);
                 body.wrap = wrap;
                 body.loading = loading.is_some();
             }
@@ -434,6 +518,7 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
 mod tests {
     use super::*;
     use crate::github::Release;
+    use crate::ui::theme::ThemeConfig;
 
     fn items(n: usize) -> Vec<Item> {
         (0..n)
@@ -447,7 +532,7 @@ mod tests {
     }
 
     fn ready(items: Vec<Item>) -> App {
-        let mut app = App::new(items, Keymap::default(), true);
+        let mut app = App::new(items, Keymap::default(), ThemeConfig::default().themes(), 0);
         app.update(Message::Resize {
             width: 80,
             height: 14,
@@ -465,6 +550,84 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn picked(app: &App) -> Option<usize> {
+        match app.popup {
+            Some(Popup::Theme(selected)) => Some(selected),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn theme_picker_previews_keeps_and_cancels() {
+        let mut app = ready(items(1));
+        let original = app.theme;
+        key(&mut app, "t");
+        assert_eq!(picked(&app), Some(0));
+        key(&mut app, "j");
+        assert_eq!(picked(&app), Some(1));
+        assert_eq!(app.theme, app.themes[1].1);
+        key(&mut app, "esc");
+        assert_eq!(picked(&app), None);
+        assert_eq!(app.theme, original);
+
+        key(&mut app, "t");
+        key(&mut app, "k");
+        assert_eq!(picked(&app), Some(0));
+        for _ in 0..app.themes.len() + 1 {
+            key(&mut app, "down");
+        }
+        assert_eq!(picked(&app), Some(app.themes.len() - 1));
+        key(&mut app, "up");
+        key(&mut app, "enter");
+        assert_eq!(picked(&app), None);
+        assert_eq!(app.theme, app.themes[app.themes.len() - 2].1);
+        assert!(!app.items[0].expanded);
+    }
+
+    #[test]
+    fn theme_picker_reopens_on_the_kept_theme_not_an_identical_one() {
+        let mut app = ready(items(1));
+        app.themes.push(("zed".into(), Theme::default_light()));
+        key(&mut app, "t");
+        for _ in 1..app.themes.len() {
+            key(&mut app, "j");
+        }
+        key(&mut app, "enter");
+        key(&mut app, "t");
+        assert_eq!(picked(&app), Some(app.themes.len() - 1));
+    }
+
+    #[test]
+    fn quit_in_theme_picker_cancels_instead_of_quitting() {
+        let mut app = ready(items(1));
+        let original = app.theme;
+        key(&mut app, "t");
+        key(&mut app, "j");
+        key(&mut app, "q");
+        assert_eq!(picked(&app), None);
+        assert_eq!(app.outcome, None);
+        assert_eq!(app.theme, original);
+    }
+
+    #[test]
+    fn theme_change_rerenders_cached_bodies() {
+        let mut item = items(1).remove(0);
+        item.body = Some("notes".into());
+        item.expanded = true;
+        let mut app = ready(vec![item]);
+        let border = |app: &App| app.body_lines(0)[0].spans[1].style;
+        assert_eq!(border(&app), Theme::default_dark().border);
+        let light = app
+            .themes
+            .iter()
+            .position(|(name, _)| name == "InspiredGitHub");
+        key(&mut app, "t");
+        for _ in 0..light.unwrap_or_default() {
+            key(&mut app, "j");
+        }
+        assert_eq!(border(&app), Theme::default_light().border);
     }
 
     #[test]
@@ -654,11 +817,36 @@ mod tests {
         for k in ["q", "?", "enter", "a"] {
             let mut app = ready(items(2));
             assert!(key(&mut app, "?").is_empty());
-            assert!(app.show_help);
+            assert_eq!(app.popup, Some(Popup::Help));
             assert!(key(&mut app, k).is_empty());
-            assert!(!app.show_help);
+            assert_eq!(app.popup, None);
             assert_eq!(app.outcome, None);
             assert!(!app.items[0].expanded);
+        }
+    }
+
+    #[test]
+    fn licences_open_from_help_scroll_and_close() {
+        for close in ["esc", "q", "?"] {
+            let mut app = ready(items(2));
+            key(&mut app, "?");
+            key(&mut app, "l");
+            assert_eq!(app.popup, Some(Popup::Licences(0)));
+            key(&mut app, "j");
+            key(&mut app, "down");
+            key(&mut app, "k");
+            assert_eq!(app.popup, Some(Popup::Licences(1)));
+            key(&mut app, "pgdown");
+            assert_eq!(app.popup, Some(Popup::Licences(9)));
+            key(&mut app, "pgup");
+            assert_eq!(app.popup, Some(Popup::Licences(1)));
+            for _ in 0..view::LICENCES.len() {
+                key(&mut app, "space");
+            }
+            assert_eq!(app.popup, Some(Popup::Licences(view::LICENCES.len() - 8)));
+            assert!(key(&mut app, close).is_empty());
+            assert_eq!(app.popup, None);
+            assert_eq!(app.outcome, None);
         }
     }
 
@@ -752,7 +940,12 @@ mod tests {
 
     #[test]
     fn resize_sets_viewport_clamped_to_one() {
-        let mut app = App::new(items(2), Keymap::default(), true);
+        let mut app = App::new(
+            items(2),
+            Keymap::default(),
+            ThemeConfig::default().themes(),
+            0,
+        );
         app.update(Message::Resize {
             width: 100,
             height: 20,

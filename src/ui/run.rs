@@ -10,6 +10,7 @@ use tokio::time::MissedTickBehavior;
 
 use super::app::{App, Effect, Item, Message, Outcome, changelog_body};
 use super::keys::{Keymap, key_name};
+use super::theme::Theme;
 use super::view;
 use crate::github::Client;
 use crate::homebrew;
@@ -24,11 +25,17 @@ pub fn detect_dark_background() -> bool {
 pub async fn run(
     items: Vec<Item>,
     keymap: Keymap,
-    dark: bool,
+    themes: Vec<(String, Theme)>,
+    active: usize,
     client: Client,
 ) -> Result<(Outcome, Vec<Item>)> {
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, App::new(items, keymap, dark), client).await;
+    let result = event_loop(
+        &mut terminal,
+        App::new(items, keymap, themes, active),
+        client,
+    )
+    .await;
     ratatui::restore();
     result
 }

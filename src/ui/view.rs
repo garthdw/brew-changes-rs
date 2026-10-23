@@ -1,29 +1,78 @@
 use std::num::NonZeroU16;
 use std::ops::Range;
+use std::sync::LazyLock;
 
 use ratatui::Frame;
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Item, Upgrade};
+use super::app::{App, FOOTER_LINES, Item, Popup, Upgrade};
 use super::keys::{self, Action};
-use super::markdown::Link;
+use super::markdown::{self, Link};
+use super::theme::Theme;
 use crate::github::Stage;
 
-pub const ACCENT: Color = Color::Rgb(0x00, 0xD7, 0x87);
-pub const BORDER: Color = Color::Rgb(0x58, 0x58, 0x58);
-pub const MUTED: Color = Color::Rgb(0x58, 0x58, 0x58);
-pub const ERROR: Color = Color::Rgb(0xFF, 0x00, 0x00);
-pub const VERSION: Color = Color::Rgb(0xFF, 0xAF, 0x00);
+/// A popup's borders and padding, in lines.
+pub const POPUP_CHROME: u16 = 4;
+
+const LICENCE_WIDTH: usize = 80;
+
+pub enum Licence {
+    Heading,
+    Path,
+    Text,
+}
+
+/// The licences of two-face's bundled syntaxes and themes. Lines are wrapped
+/// at a fixed width, not the terminal's, so the scroll range doesn't depend
+/// on it. Only the few long lines are wrapped, as wrapping drops indentation.
+pub static LICENCES: LazyLock<Vec<(Licence, String)>> = LazyLock::new(|| {
+    let listing = two_face::acknowledgement::listing();
+    let mut lines = vec![
+        (
+            Licence::Text,
+            "Syntax highlighting uses the syntaxes and themes curated by".into(),
+        ),
+        (
+            Licence::Text,
+            "bat (github.com/sharkdp/bat), packaged by two-face.".into(),
+        ),
+    ];
+    for (heading, licences) in [
+        ("Syntaxes", listing.for_syntaxes()),
+        ("Themes", listing.for_themes()),
+    ] {
+        lines.push((Licence::Text, String::new()));
+        lines.push((Licence::Heading, heading.into()));
+        for licence in licences {
+            lines.push((Licence::Text, String::new()));
+            lines.push((Licence::Path, licence.rel_path.display().to_string()));
+            for line in licence.text.lines() {
+                // Tabs would be drawn one cell wide.
+                let line = line.replace('\t', "    ");
+                if line.width() <= LICENCE_WIDTH {
+                    lines.push((Licence::Text, line));
+                    continue;
+                }
+                let wrapped = markdown::wrap(vec![(Span::raw(line), None)], LICENCE_WIDTH);
+                lines.extend(wrapped.into_iter().map(|pieces| {
+                    let text = pieces.iter().map(|(span, _)| span.content.as_ref());
+                    (Licence::Text, text.collect())
+                }));
+            }
+        }
+    }
+    lines
+});
 
 const SPINNER: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
-const HELP_ROWS: [(&[Action], &str); 10] = [
+const HELP_ROWS: [(&[Action], &str); 11] = [
     (&[Action::MoveUp, Action::MoveDown], "move the cursor"),
     (
         &[Action::MoveUpOrScrollUp, Action::MoveDownOrScrollDown],
@@ -35,20 +84,13 @@ const HELP_ROWS: [(&[Action], &str); 10] = [
     (&[Action::OpenChangelog], "open changelog"),
     (&[Action::UpgradeAll], "upgrade all"),
     (&[Action::UpgradeCurrent], "upgrade current"),
+    (&[Action::PickTheme], "pick theme"),
     (&[Action::Help], "help"),
     (&[Action::Quit], "quit"),
 ];
 
-pub fn dim() -> Style {
-    Style::new().fg(MUTED)
-}
-
-pub fn bold() -> Style {
-    Style::new().add_modifier(Modifier::BOLD)
-}
-
-fn spinner(tick: usize) -> Span<'static> {
-    Span::styled(SPINNER[tick % SPINNER.len()], dim())
+fn spinner(tick: usize, theme: &Theme) -> Span<'static> {
+    Span::styled(SPINNER[tick % SPINNER.len()], theme.muted)
 }
 
 /// Lines `range` of the item list, building only the rows that fall in it.
@@ -95,6 +137,7 @@ pub fn frame_body(
     links: Vec<Link>,
     loading: Option<&Stage>,
     tick: usize,
+    theme: &Theme,
 ) -> (Vec<Line<'static>>, Vec<Link>) {
     let links = links
         .into_iter()
@@ -110,29 +153,26 @@ pub fn frame_body(
             Stage::File(filename) => format!(" checking {filename}..."),
             Stage::Releases => " fetching releases...".to_string(),
         };
-        content.push(Line::from(vec![spinner(tick), Span::raw(text)]));
+        content.push(Line::from(vec![spinner(tick, theme), Span::raw(text)]));
     }
     if content.is_empty() {
-        content.push(Line::styled("(empty)", dim()));
+        content.push(Line::styled("(empty)", theme.muted));
     }
-    (frame(content), links)
+    (frame(content, theme), links)
 }
 
 fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
-    let (mut cursor, mut version, mut hint, mut name) = (
-        Style::new().fg(ACCENT),
-        Style::new().fg(VERSION),
-        dim(),
-        Style::new(),
-    );
+    let theme = &app.theme;
+    let (mut cursor, mut version, mut hint, mut name) =
+        (theme.accent, theme.version, theme.muted, Style::new());
     if item.upgrade == Upgrade::Done {
-        (cursor, version, name) = (dim(), dim(), dim());
+        (cursor, version, name) = (theme.muted, theme.muted, theme.muted);
     } else if index == app.cursor && !item.expanded {
         (cursor, version, hint, name) = (
-            cursor.patch(bold()),
-            version.patch(bold()),
-            hint.patch(bold()),
-            bold(),
+            cursor.patch(theme.selected),
+            version.patch(theme.selected),
+            hint.patch(theme.selected),
+            theme.selected,
         );
     }
     let source = &item.source;
@@ -158,23 +198,23 @@ fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
         Upgrade::Running => {
             spans.extend([
                 Span::raw("  "),
-                spinner(app.spinner),
+                spinner(app.spinner, theme),
                 Span::raw(" upgrading..."),
             ]);
         }
-        Upgrade::Done => spans.extend([Span::raw("  "), Span::styled("[upgraded]", dim())]),
+        Upgrade::Done => spans.extend([Span::raw("  "), Span::styled("[upgraded]", theme.muted)]),
         Upgrade::Failed(_) => spans.extend([
             Span::raw("  "),
-            Span::styled("[upgrade failed]", Style::new().fg(ERROR)),
+            Span::styled("[upgrade failed]", theme.error),
         ]),
     }
     Line::from(spans)
 }
 
 /// A rounded border with horizontal padding 1 and a left margin of 2.
-fn frame(content: Vec<Line<'static>>) -> Vec<Line<'static>> {
+fn frame(content: Vec<Line<'static>>, theme: &Theme) -> Vec<Line<'static>> {
     let width = content.iter().map(Line::width).max().unwrap_or(0);
-    let border = Style::new().fg(BORDER);
+    let border = theme.border;
     let edge = |left: &str, right: &str| {
         Line::from(vec![
             Span::raw("  "),
@@ -260,24 +300,59 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new(Line::styled("Outdated packages:", bold())),
+        Paragraph::new(Line::styled("Outdated packages:", app.theme.header)),
         header,
     );
     let visible = lines_in(app, app.offset..app.offset + app.height as usize);
     frame.render_widget(Paragraph::new(visible), body);
     // A link cell's forced width would hide the popup cells it spans.
-    if !app.show_help {
+    if app.popup.is_none() {
         for link in links_in(app, app.offset..app.offset + app.height as usize) {
             hyperlink(frame.buffer_mut(), body, &link);
         }
     }
     let footer_line = match &app.notice {
-        Some(notice) => Line::styled(notice.clone(), Style::new().fg(ERROR)),
-        None => Line::styled(hints(app), dim()),
+        Some(notice) => Line::styled(notice.clone(), app.theme.error),
+        None => Line::styled(hints(app), app.theme.muted),
     };
     frame.render_widget(Paragraph::new(footer_line), footer);
-    if app.show_help {
-        draw_help(frame, app);
+    match &app.popup {
+        None => {}
+        Some(Popup::Help) => draw_popup(
+            frame,
+            app,
+            "About",
+            help_lines(app),
+            Scroll::From(0),
+            "[l] licences  press any key to close".into(),
+        ),
+        Some(Popup::Licences(offset)) => {
+            let scroll =
+                |action, default| keys::glyph(app.keymap.hint_key(action).unwrap_or(default));
+            draw_popup(
+                frame,
+                app,
+                "Licences",
+                licence_lines(&app.theme),
+                Scroll::From(*offset),
+                format!(
+                    "[{}/{}] scroll  [pgup/pgdown] page  [esc] close",
+                    scroll(Action::MoveDownOrScrollDown, "j"),
+                    scroll(Action::MoveUpOrScrollUp, "k"),
+                ),
+            );
+        }
+        Some(Popup::Theme(selected)) => {
+            let keep = app.keymap.hint_key(Action::ToggleExpand).unwrap_or("enter");
+            draw_popup(
+                frame,
+                app,
+                "Theme",
+                theme_picker_lines(app, *selected),
+                Scroll::Reveal(*selected),
+                format!("[{}] keep  [esc] cancel  (not saved)", keys::glyph(keep)),
+            );
+        }
     }
 }
 
@@ -313,6 +388,7 @@ fn hyperlink(buffer: &mut Buffer, area: Rect, link: &Link) {
 
 /// Keys are read from the active keymap so overrides show up here.
 fn help_lines(app: &App) -> Vec<Line<'static>> {
+    let theme = &app.theme;
     let keys: Vec<String> = HELP_ROWS
         .iter()
         .map(|(actions, _)| {
@@ -329,53 +405,119 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
     let key_width = keys.iter().map(|key| key.width()).max().unwrap_or(0);
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("brew-changes", bold()),
-            Span::styled(format!(" {}", crate::VERSION), dim()),
+            Span::styled("brew-changes", theme.header),
+            Span::styled(format!(" {}", crate::VERSION), theme.muted),
         ]),
         Line::styled(
             "Interactive changelog viewer for outdated Homebrew packages",
-            dim(),
+            theme.muted,
         ),
         Line::raw(""),
         Line::raw("by Garth de Wet"),
         Line::raw("made with Claude Code"),
         Line::raw("https://github.com/garthdw/brew-changes-rs"),
+        Line::raw("Syntaxes and themes from bat, via two-face"),
         Line::raw(""),
     ];
     for (key, (_, label)) in keys.iter().zip(HELP_ROWS) {
         let padding = " ".repeat(key_width.saturating_sub(key.width()));
         lines.push(Line::from(vec![
-            Span::styled(format!("{key}{padding}"), Style::new().fg(VERSION)),
+            Span::styled(format!("{key}{padding}"), theme.version),
             Span::raw(format!("  {label}")),
         ]));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled("press any key to close", dim()));
     lines
 }
 
-/// Clamped to the terminal width minus 6.
-fn draw_help(frame: &mut Frame, app: &App) {
-    let lines = help_lines(app);
+fn licence_lines(theme: &Theme) -> Vec<Line<'static>> {
+    LICENCES
+        .iter()
+        .map(|(kind, text)| {
+            let style = match kind {
+                Licence::Heading => theme.header,
+                Licence::Path => theme.heading,
+                Licence::Text => Style::new(),
+            };
+            Line::styled(text.as_str(), style)
+        })
+        .collect()
+}
+
+fn theme_picker_lines(app: &App, selected: usize) -> Vec<Line<'static>> {
+    app.themes
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _))| {
+            if index == selected {
+                Line::from(vec![
+                    Span::styled("> ", app.theme.accent),
+                    Span::styled(name.clone(), app.theme.selected),
+                ])
+            } else {
+                Line::raw(format!("  {name}"))
+            }
+        })
+        .collect()
+}
+
+/// Where a popup taller than the terminal scrolls to.
+enum Scroll {
+    /// As little as keeps this line in view.
+    Reveal(usize),
+    /// To this line, stopping once the last line is in view.
+    From(usize),
+}
+
+/// Clamped to the terminal width minus 6, and kept above the footer so its
+/// hints stay readable. The hint sits on the bottom border so it stays
+/// visible however far the popup scrolls.
+fn draw_popup(
+    frame: &mut Frame,
+    app: &App,
+    title: &'static str,
+    lines: Vec<Line<'static>>,
+    scroll: Scroll,
+    hint: String,
+) {
     let area = frame.area();
-    let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    let area = Rect {
+        height: area.height.saturating_sub(FOOTER_LINES),
+        ..area
+    };
+    let content_width = lines
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or(0)
+        .max(hint.width());
     let content_width = u16::try_from(content_width)
         .unwrap_or(u16::MAX)
         .min(area.width.saturating_sub(6).max(1));
     let height = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
-        .saturating_add(4);
+        .saturating_add(POPUP_CHROME);
     let popup = area.centered(
         Constraint::Length(content_width.saturating_add(6)),
         Constraint::Length(height),
     );
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(BORDER))
-        .title("About")
+        .border_style(app.theme.border)
+        .title(title)
+        .title_bottom(Line::styled(hint, app.theme.muted))
         .padding(Padding::new(2, 2, 1, 1));
+    let visible = usize::from(popup.height.saturating_sub(POPUP_CHROME));
+    let scroll = match scroll {
+        Scroll::Reveal(line) => (line + 1).saturating_sub(visible),
+        Scroll::From(line) => line.min(lines.len().saturating_sub(visible)),
+    };
     frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        popup,
+    );
 }
 
 #[cfg(test)]
@@ -384,11 +526,13 @@ mod tests {
     use crate::github::Source;
     use crate::ui::app::Message;
     use crate::ui::keys::Keymap;
+    use crate::ui::theme::ThemeConfig;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier};
 
     fn app(items: Vec<Item>, width: u16) -> App {
-        let mut app = App::new(items, Keymap::default(), true);
+        let mut app = App::new(items, Keymap::default(), ThemeConfig::default().themes(), 0);
         app.update(Message::Resize { width, height: 20 });
         app
     }
@@ -610,5 +754,78 @@ mod tests {
         assert!(rendered.contains("About") && rendered.contains("press any key to close"));
         assert!(rendered.contains(&format!("brew-changes {}", env!("CARGO_PKG_VERSION"))));
         assert!(rendered.contains("J/K/↑/↓"));
+        assert!(rendered.contains("pick theme"));
+    }
+
+    #[test]
+    fn help_credits_two_face_and_opens_licences() {
+        let mut app = app(vec![item("alpha")], 80);
+        app.update(Message::Key("?".into()));
+        let rendered = screen(&app);
+        assert!(rendered.contains("two-face"), "{rendered}");
+        assert!(rendered.contains("[l] licences"), "{rendered}");
+        app.update(Message::Key("l".into()));
+        let rendered = screen(&app);
+        assert!(rendered.contains("Licences"), "{rendered}");
+        assert!(rendered.contains("Syntaxes"), "{rendered}");
+        assert!(rendered.contains("[esc] close"), "{rendered}");
+    }
+
+    #[test]
+    fn licence_lines_fit_the_fixed_width() {
+        assert!(LICENCES.len() > 1000);
+        assert!(
+            LICENCES
+                .iter()
+                .all(|(_, line)| line.width() <= LICENCE_WIDTH && !line.contains('\t'))
+        );
+    }
+
+    #[test]
+    fn header_and_help_name_use_theme_header() {
+        let mut app = app(vec![item("alpha")], 80);
+        app.theme.header = Style::new().fg(Color::Magenta);
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(0, 0)].fg, Color::Magenta);
+        let name = help_lines(&app)[0].spans[0].style;
+        assert_eq!(name, app.theme.header);
+    }
+
+    #[test]
+    fn draws_theme_picker() {
+        let mut app = app(vec![item("alpha")], 80);
+        app.update(Message::Key("t".into()));
+        app.update(Message::Key("j".into()));
+        let rendered = screen(&app);
+        assert!(rendered.contains("Theme"), "{rendered}");
+        assert!(rendered.contains("  base16-ocean.dark"), "{rendered}");
+        assert!(rendered.contains("> base16-eighties.dark"), "{rendered}");
+        assert!(
+            rendered.contains("[enter] keep  [esc] cancel"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn theme_picker_scrolls_to_selection_on_short_terminals() {
+        let mut app = app(vec![item("alpha")], 80);
+        app.update(Message::Key("t".into()));
+        for _ in 1..app.themes.len() {
+            app.update(Message::Key("j".into()));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        let last = app.themes.last().map(|(name, _)| name.as_str());
+        assert!(
+            last.is_some_and(|last| rendered.contains(&format!("> {last}"))),
+            "{rendered}"
+        );
+        let buffer = terminal.backend().buffer();
+        let row = |y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert!(row(7).contains("keep"), "{rendered}");
+        assert_eq!(row(8).trim(), "", "{rendered}");
+        assert!(row(9).starts_with("[enter] expand/collapse"), "{rendered}");
     }
 }
