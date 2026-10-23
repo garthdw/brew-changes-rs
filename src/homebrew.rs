@@ -125,7 +125,7 @@ struct FormulaUrls {
 
 #[derive(Deserialize)]
 struct CaskInfo {
-    full_token: String,
+    token: String,
     #[serde(default)]
     homepage: Option<String>,
     #[serde(default)]
@@ -160,7 +160,7 @@ fn parse_info(json: &[u8]) -> Result<HashMap<String, Info>> {
             version: upstream_version(&cask.version.unwrap_or_default(), true),
             ..Default::default()
         };
-        (cask.full_token, info)
+        (cask.token, info)
     });
     Ok(formulae.chain(casks).collect())
 }
@@ -421,8 +421,9 @@ mod tests {
             }
         );
         assert_eq!(infos["headonly"].head, "https://example.com/head.git");
+        // `brew outdated` names casks by bare token, even from other taps.
         assert_eq!(
-            infos["someuser/tap/app"],
+            infos["app"],
             Info {
                 homepage: "https://example.com".into(),
                 url: "https://example.com/app.dmg".into(),

@@ -64,8 +64,8 @@ EOF
 
 cat >"$dir/info-cask.json" <<'EOF'
 {"casks": [
-  {"full_token": "cask-app", "homepage": "https://github.com/fake/cask-app"},
-  {"full_token": "no-source", "homepage": "https://example.com"}
+  {"token": "cask-app", "full_token": "cask-app", "homepage": "https://github.com/fake/cask-app"},
+  {"token": "no-source", "full_token": "no-source", "homepage": "https://example.com"}
 ]}
 EOF
 

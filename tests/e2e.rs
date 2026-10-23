@@ -46,7 +46,7 @@ fn brew_shim(test: &str, outdated: Value) -> Result<PathBuf> {
     )?;
     fs::write(
         dir.join("info-cask.json"),
-        json!({"casks": [{"full_token": "e2e-app", "homepage": "https://example.com"}]})
+        json!({"casks": [{"token": "e2e-app", "full_token": "someuser/tap/e2e-app", "homepage": "https://example.com"}]})
             .to_string(),
     )?;
     let shim = dir.join("bin/brew");
