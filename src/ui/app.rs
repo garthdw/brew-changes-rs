@@ -618,7 +618,7 @@ mod tests {
         item.expanded = true;
         let mut app = ready(vec![item]);
         let border = |app: &App| app.body_lines(0)[0].spans[1].style;
-        assert_eq!(border(&app), Theme::default_dark().border);
+        assert_eq!(border(&app), app.theme.border);
         let light = app
             .themes
             .iter()

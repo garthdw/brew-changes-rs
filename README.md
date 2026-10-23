@@ -85,7 +85,7 @@ Themes live in `theme.json`, next to `keymap.json`:
 
 ```json
 {
-  "theme": { "dark": "base16-ocean.dark", "light": "InspiredGitHub" },
+  "theme": { "dark": "Monokai Extended Origin", "light": "InspiredGitHub" },
   "themes": {
     "InspiredGitHub": { "link": { "fg": "#0366d6", "underline": false } },
     "Solarized (dark)": { "border": "#586e75", "selected": { "reversed": true } },
@@ -101,14 +101,14 @@ detected background. Either half may be left out to keep its default.
 picker that previews each theme live; neither is saved.
 
 The built-in themes are bat's, via [two-face](https://crates.io/crates/two-face):
-`base16-ocean.dark` (default dark), `base16-eighties.dark`,
+`base16-ocean.dark`, `base16-eighties.dark`,
 `base16-mocha.dark`, `base16-ocean.light`, `InspiredGitHub` (default light),
 `Solarized (dark)` and `Solarized (light)` first, then `ansi`, `base16`,
 `base16-256` (these three use the terminal's own colours), `Catppuccin
 Frappe`, `Catppuccin Latte`, `Catppuccin Macchiato`, `Catppuccin Mocha`,
 `Coldark-Cold`, `Coldark-Dark`, `DarkNeon`, `Dracula`, `GitHub`,
 `gruvbox-dark`, `gruvbox-light`, `1337`, `Monokai Extended` (plus `Bright`,
-`Light` and `Origin`), `Nord`, `OneHalfDark`, `OneHalfLight`, `Sublime
+`Light` and `Origin`, the default dark), `Nord`, `OneHalfDark`, `OneHalfLight`, `Sublime
 Snazzy`, `TwoDark` and `zenburn`.
 Each brings its own palette to the list, headings, links and code, matching
 its syntax highlighting (versions use the theme's number colour, for

@@ -12,7 +12,7 @@ use two_face::theme::EmbeddedLazyThemeSet;
 
 use super::keys::{config_path, load_config};
 
-const DEFAULT_DARK: &str = "base16-ocean.dark";
+const DEFAULT_DARK: &str = "Monokai Extended Origin";
 const DEFAULT_LIGHT: &str = "InspiredGitHub";
 
 /// bat's themes, via two-face. Loaded on first use; the picker lists them
@@ -93,7 +93,7 @@ const SOLARIZED: Palette = Palette {
 
 /// Hand-tuned palettes, listed first. bat's other themes get `derived` ones.
 const BUILTINS: [(&str, Palette); 7] = [
-    (DEFAULT_DARK, OCEAN_DARK),
+    ("base16-ocean.dark", OCEAN_DARK),
     (
         "base16-eighties.dark",
         base16(
@@ -257,7 +257,8 @@ impl Theme {
     }
 
     pub fn default_dark() -> Self {
-        Self::from_palette(DEFAULT_DARK, &OCEAN_DARK)
+        Self::builtin(DEFAULT_DARK)
+            .unwrap_or_else(|| Self::from_palette("base16-ocean.dark", &OCEAN_DARK))
     }
 
     pub fn default_light() -> Self {
@@ -610,7 +611,7 @@ mod tests {
 
     #[test]
     fn style_objects_set_colours_and_modifiers() {
-        let json = r##"{"themes": {"base16-ocean.dark": {
+        let json = r##"{"theme": "base16-ocean.dark", "themes": {"base16-ocean.dark": {
             "title": {"fg": "white", "bg": "#000000"},
             "link": {"underline": false, "italic": true},
             "selected": {"bold": false, "reversed": true},
@@ -644,7 +645,11 @@ mod tests {
 
     #[test]
     fn derived_palettes_match_hand_tuned_base16() {
-        for name in [DEFAULT_DARK, "base16-eighties.dark", "base16-mocha.dark"] {
+        for name in [
+            "base16-ocean.dark",
+            "base16-eighties.dark",
+            "base16-mocha.dark",
+        ] {
             let hand_tuned = BUILTINS.iter().find(|(builtin, _)| *builtin == name);
             let derived = SYNTAX_THEMES.themes.get(name).map(derived);
             assert_eq!(
@@ -688,7 +693,7 @@ mod tests {
                 "custom": {"accent": "red"},
                 "typo": {"syntax": "base16-ocean.drak"},
                 "number": {"syntax": 1},
-                "base16-ocean.dark": {
+                "Monokai Extended Origin": {
                     "accnt": "red",
                     "link": "notacolour",
                     "code": {"fg": "red", "blink": true},
