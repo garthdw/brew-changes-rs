@@ -16,7 +16,9 @@
 #
 # Usage: scripts/run-with-fake-brew.sh [brew-changes args...]
 #   e.g. scripts/run-with-fake-brew.sh --theme "Solarized (light)"
-# Set FAKE_BREW_UPGRADE_FAIL=1 to make in-place upgrades fail.
+# Set FAKE_BREW_UPGRADE_FAIL=1 to make in-place upgrades fail,
+# FAKE_BREW_UPGRADE_SECONDS=N to make them take N seconds (default 1), and
+# FAKE_GITHUB_RATE_LIMITED=1 to make every GitHub request hit the rate limit.
 
 set -euo pipefail
 
@@ -78,7 +80,7 @@ case "\$1 \$3" in
   "info --formula") cat "\$dir/info-formula.json" ;;
   "info --cask") cat "\$dir/info-cask.json" ;;
   upgrade*)
-    sleep 1
+    sleep "\${FAKE_BREW_UPGRADE_SECONDS:-1}"
     if [ -n "\${FAKE_BREW_UPGRADE_FAIL:-}" ]; then
       echo "Error: fake upgrade failure for \$*" >&2
       exit 1
@@ -92,6 +94,7 @@ chmod +x "$dir/bin/brew"
 cat >"$dir/github.py" <<'EOF'
 import base64
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -153,7 +156,7 @@ ROUTES = {
     "/repos/fake/release-tool/contents/": [{"name": "README.md", "type": "file"}],
     "/repos/fake/release-tool/releases": [
         release("v2.1.0", "2026-10-01T00:00:00Z", "## What's changed\n\n- Faster startup\n- `--json` output\n\n```sh\nrelease-tool --json | jq .\n```"),
-        release("v2.0.1", "2026-09-01T00:00:00Z", "- Fixed a crash on empty input"),
+        release("v2.0.1", "2026-09-01T00:00:00Z", "- Fixed a crash on empty input\n- ```sh\n  release-tool < /dev/null\n  ```"),
         release("v2.0.0", "2026-08-01T00:00:00Z", "- Big rewrite"),
     ],
     "/repos/fake/cask-app/contents/": [],
@@ -166,6 +169,11 @@ ROUTES = {
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if os.environ.get("FAKE_GITHUB_RATE_LIMITED"):
+            self.send_response(403)
+            self.send_header("x-ratelimit-remaining", "0")
+            self.end_headers()
+            return
         body = ROUTES.get(urlsplit(self.path).path)
         self.send_response(404 if body is None else 200)
         self.send_header("Content-Type", "application/json")
