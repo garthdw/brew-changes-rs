@@ -235,8 +235,12 @@ impl Renderer {
                 // Relative and anchor links lead nowhere from a terminal.
                 if dest_url.contains("://") {
                     // A control character would end the OSC 8 sequence early.
-                    self.urls
-                        .push(dest_url.chars().filter(|c| !c.is_control()).collect());
+                    self.urls.push(
+                        dest_url
+                            .chars()
+                            .filter(|character| !character.is_control())
+                            .collect(),
+                    );
                     self.link = Some(self.urls.len() - 1);
                 }
             }
