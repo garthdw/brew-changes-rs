@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use url::Url;
 
+use super::codeberg::Codeberg;
 use super::forge::{Forge, GitHub};
 use super::gitlab::GitLab;
 use super::tangled::Tangled;
@@ -138,7 +139,7 @@ fn resolve_repo(urls: &[&str]) -> Option<Arc<dyn Forge>> {
 
 /// GitLab is any `gitlab.*` host. Its project paths can nest groups, so the
 /// path runs up to GitLab's `/-/` separator or a pre-separator route
-/// (`/uploads/`, `/repository/`); Tangled's is always `owner/repo`.
+/// (`/uploads/`, `/repository/`); Tangled's and Codeberg's are always `owner/repo`.
 fn parse_other_forge_url(url: &str) -> Option<Arc<dyn Forge>> {
     const GITLAB_ROUTES: [&str; 2] = ["uploads", "repository"];
     let parsed = Url::parse(url).ok()?;
@@ -166,6 +167,9 @@ fn parse_other_forge_url(url: &str) -> Option<Arc<dyn Forge>> {
     } else if host == "tangled.org" || host == "tangled.sh" {
         segments.truncate(2);
         |base, owner, repo| Arc::new(Tangled::new(base, owner, repo))
+    } else if host == "codeberg.org" {
+        segments.truncate(2);
+        |base, owner, repo| Arc::new(Codeberg::new(base, owner, repo))
     } else {
         return None;
     };
@@ -211,6 +215,9 @@ mod tests {
         let gitlab = |base: &str, owner: &str, repo: &str| {
             Some(Arc::new(GitLab::new(base, owner, repo)) as Arc<dyn Forge>)
         };
+        let codeberg = |owner: &str, repo: &str| {
+            Some(Arc::new(Codeberg::new("https://codeberg.org", owner, repo)) as Arc<dyn Forge>)
+        };
         let tangled = |owner: &str, repo: &str| {
             Some(Arc::new(Tangled::new("https://tangled.org", owner, repo)) as Arc<dyn Forge>)
         };
@@ -249,6 +256,20 @@ mod tests {
                 tangled("tobinio.dev", "cargo-features-manager"),
             ),
             ("https://notgitlab.com/o/p", None),
+            (
+                "https://codeberg.org/dnkl/foot/releases/download/1.28.0/foot-1.28.0.tar.gz",
+                codeberg("dnkl", "foot"),
+            ),
+            (
+                "https://codeberg.org/chrisn/audiowaveform/archive/1.11.1.tar.gz",
+                codeberg("chrisn", "audiowaveform"),
+            ),
+            (
+                "https://codeberg.org/Freso/python-onion-location.git",
+                codeberg("Freso", "python-onion-location"),
+            ),
+            ("https://codeberg.org/only-an-owner", None),
+            ("https://oath-toolkit.codeberg.page/", None),
         ];
         for (url, want) in cases {
             assert_eq!(resolve_repo(&[url]), want, "{url}");
@@ -284,6 +305,15 @@ mod tests {
         assert_eq!(
             tangled.releases_url().as_deref(),
             Some("https://tangled.org/o/r/tags")
+        );
+        let codeberg = Source::with_forge(Codeberg::new("https://codeberg.org", "o", "r"));
+        assert_eq!(
+            codeberg.file_url("NEWS").as_deref(),
+            Some("https://codeberg.org/o/r/src/branch/HEAD/NEWS")
+        );
+        assert_eq!(
+            codeberg.releases_url().as_deref(),
+            Some("https://codeberg.org/o/r/releases")
         );
         assert_eq!(Source::default().repo_url(), None);
     }

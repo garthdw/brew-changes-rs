@@ -345,6 +345,7 @@ fn rfc3339(unix_seconds: i64) -> String {
 mod tests {
     use super::*;
     use crate::github::Release;
+    use crate::github::codeberg::Codeberg;
     use crate::github::forge::GitHub;
     use crate::github::gitlab::GitLab;
     use crate::github::tangled::Tangled;
@@ -978,6 +979,137 @@ mod tests {
                 .map(|release| (release.tag_name.as_str(), release.body.as_str()))
                 .collect::<Vec<_>>(),
             [("v2.0.0", "notes"), ("v1.5.0", "tagged 1.5")]
+        );
+    }
+
+    const CODEBERG_REPO: &str = "/api/v1/repos/o/r";
+
+    #[tokio::test]
+    async fn codeberg_changelog_file() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            &format!("{CODEBERG_REPO}/git/trees/HEAD"),
+            json!({"tree": [{"path": "doc", "type": "tree"}, {"path": "CHANGELOG.md", "type": "blob"}]}),
+        )
+        .await;
+        Mock::given(path(format!("{CODEBERG_REPO}/raw/CHANGELOG.md")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("## 2.0.0\nnotes\n## 1.0.0\nold\n", "text/plain"),
+            )
+            .mount(&server)
+            .await;
+        let source = Source::with_forge(Codeberg::new(server.uri(), "o", "r"));
+        let got = client.fetch(&source, "1.0.0", "2.0.0", |_| {}).await;
+        let Changelog::File {
+            filename, section, ..
+        } = got
+        else {
+            panic!("not a file: {got:?}");
+        };
+        assert_eq!(
+            (filename.as_str(), section.as_str()),
+            ("CHANGELOG.md", "## 2.0.0\nnotes")
+        );
+    }
+
+    #[tokio::test]
+    async fn codeberg_releases() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            &format!("{CODEBERG_REPO}/git/trees/HEAD"),
+            json!({"tree": []}),
+        )
+        .await;
+        serve(
+            &server,
+            &format!("{CODEBERG_REPO}/releases"),
+            json!([
+                {"tag_name": "1.28.0", "body": "new", "published_at": "2026-09-02T13:02:54+02:00", "prerelease": false},
+                {"tag_name": "1.27.0", "body": "old"},
+            ]),
+        )
+        .await;
+        let source = Source::with_forge(Codeberg::new(server.uri(), "o", "r"));
+        let got = client.fetch(&source, "1.27.0", "1.28.0", |_| {}).await;
+        let (_, releases) = releases(got);
+        assert!(releases.found);
+        assert_eq!(
+            releases.list,
+            [Release {
+                tag_name: "1.28.0".into(),
+                body: "new".into(),
+                published_at: "2026-09-02T13:02:54+02:00".into(),
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn codeberg_tags_when_no_releases() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            &format!("{CODEBERG_REPO}/git/trees/HEAD"),
+            json!({"tree": []}),
+        )
+        .await;
+        serve(&server, &format!("{CODEBERG_REPO}/releases"), json!([])).await;
+        serve(
+            &server,
+            &format!("{CODEBERG_REPO}/tags"),
+            json!([
+                {"name": "v2.0.0", "message": "Release 2.0.0\n\nnotes\n"},
+                {"name": "v1.0.0", "message": ""},
+            ]),
+        )
+        .await;
+        let source = Source::with_forge(Codeberg::new(server.uri(), "o", "r"));
+        let got = client.fetch(&source, "1.0.0", "2.0.0", |_| {}).await;
+        let (_, releases) = releases(got);
+        assert_eq!(
+            releases
+                .list
+                .iter()
+                .map(|release| (release.tag_name.as_str(), release.body.as_str()))
+                .collect::<Vec<_>>(),
+            [("v2.0.0", "Release 2.0.0\n\nnotes\n")]
+        );
+    }
+
+    /// Forgejo answers 404 for releases when a repo turns them off.
+    #[tokio::test]
+    async fn codeberg_tags_when_releases_are_disabled() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            &format!("{CODEBERG_REPO}/git/trees/HEAD"),
+            json!({"tree": []}),
+        )
+        .await;
+        Mock::given(path(format!("{CODEBERG_REPO}/releases")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        serve(
+            &server,
+            &format!("{CODEBERG_REPO}/tags"),
+            json!([{"name": "v2.0.0", "message": "notes"}, {"name": "v1.0.0"}]),
+        )
+        .await;
+        let source = Source::with_forge(Codeberg::new(server.uri(), "o", "r"));
+        let got = client.fetch(&source, "1.0.0", "2.0.0", |_| {}).await;
+        let (_, releases) = releases(got);
+        assert!(releases.found);
+        assert_eq!(
+            releases
+                .list
+                .iter()
+                .map(|release| release.tag_name.as_str())
+                .collect::<Vec<_>>(),
+            ["v2.0.0"]
         );
     }
 

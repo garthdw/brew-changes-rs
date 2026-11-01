@@ -1,3 +1,4 @@
+mod codeberg;
 mod fetch;
 mod forge;
 mod gitlab;
@@ -34,6 +35,22 @@ pub struct Client {
     retry_delay: Duration,
     token: Arc<OnceCell<Option<String>>>,
 }
+
+/// Lets a forge tell a particular status, like Forgejo's 404 for a repo
+/// with releases turned off, from other failures.
+#[derive(Debug)]
+struct StatusError {
+    url: String,
+    status: u16,
+}
+
+impl std::fmt::Display for StatusError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "GET {}: status {}", self.url, self.status)
+    }
+}
+
+impl std::error::Error for StatusError {}
 
 struct RawFetchError {
     error: anyhow::Error,
@@ -121,7 +138,11 @@ impl Client {
             );
         }
         if status != reqwest::StatusCode::OK {
-            bail!("GET {url}: status {}", status.as_u16());
+            return Err(StatusError {
+                url: url.into(),
+                status: status.as_u16(),
+            }
+            .into());
         }
         let next = response
             .headers()
