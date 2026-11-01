@@ -15,7 +15,7 @@ use url::Url;
 
 pub use fetch::{Changelog, Commit, Releases, Stage};
 pub use releases::Release;
-pub use source::{Source, resolve_source};
+pub use source::{Forge, Source, resolve_source};
 
 // Without a timeout a stalled connection (VPN, captive portal) hangs forever.
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -94,14 +94,15 @@ impl Client {
             .as_deref()
     }
 
-    /// Also returns the Link header's next-page URL.
+    /// Also returns the Link header's next-page URL, which GitLab sends too.
+    /// The GitHub token goes only to GitHub's API, never to another forge.
     async fn get_json_page<T: DeserializeOwned>(&self, url: &str) -> Result<(T, Option<String>)> {
-        let mut request = self
-            .http
-            .get(url)
-            .header("Accept", "application/vnd.github+json");
-        if let Some(token) = self.token().await {
-            request = request.bearer_auth(token);
+        let mut request = self.http.get(url);
+        if url.starts_with(&format!("{}/", self.api_base)) {
+            request = request.header("Accept", "application/vnd.github+json");
+            if let Some(token) = self.token().await {
+                request = request.bearer_auth(token);
+            }
         }
         let response = request.send().await?;
         let status = response.status();

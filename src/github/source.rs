@@ -1,11 +1,47 @@
+use url::Url;
+
 use crate::changelog::Order;
 use crate::{config, template};
 
+/// Where the repo is hosted. `base` is the origin ("https://gitlab.gnome.org"),
+/// since self-hosted GitLab instances all serve the same API.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum Forge {
+    #[default]
+    GitHub,
+    GitLab {
+        base: String,
+    },
+    Tangled {
+        base: String,
+    },
+}
+
+impl Forge {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::GitHub => "GitHub",
+            Self::GitLab { .. } => "GitLab",
+            Self::Tangled { .. } => "Tangled",
+        }
+    }
+
+    /// Tangled has tags but no releases.
+    pub fn releases_label(&self) -> String {
+        match self {
+            Self::Tangled { .. } => format!("{} tags", self.name()),
+            _ => format!("{} releases", self.name()),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Source {
-    /// Empty when no GitHub repo is known.
+    /// Empty when no repo is known. A GitLab owner can be a nested group
+    /// ("group/subgroup").
     pub owner: String,
     pub repo: String,
+    pub forge: Forge,
     pub manual_url: String,
     pub prereleases_only: bool,
     /// The repo's commits between two versions whose last component is the
@@ -24,20 +60,44 @@ impl Source {
         !self.owner.is_empty()
     }
 
-    pub fn github_url(&self) -> Option<String> {
+    pub fn repo_url(&self) -> Option<String> {
+        let base = match &self.forge {
+            Forge::GitHub => "https://github.com",
+            Forge::GitLab { base } | Forge::Tangled { base } => base,
+        };
         self.has_repo()
-            .then(|| format!("https://github.com/{}/{}", self.owner, self.repo))
+            .then(|| format!("{base}/{}/{}", self.owner, self.repo))
+    }
+
+    pub fn file_url(&self, filename: &str) -> Option<String> {
+        let separator = match self.forge {
+            Forge::GitLab { .. } => "/-",
+            _ => "",
+        };
+        Some(format!(
+            "{}{separator}/blob/HEAD/{filename}",
+            self.repo_url()?
+        ))
+    }
+
+    pub fn releases_url(&self) -> Option<String> {
+        let path = match self.forge {
+            Forge::GitHub => "/releases",
+            Forge::GitLab { .. } => "/-/releases",
+            Forge::Tangled { .. } => "/tags",
+        };
+        Some(format!("{}{path}", self.repo_url()?))
     }
 }
 
 /// The single place a changelog source is chosen, shared by the app and the
 /// validator so the validator exercises the shipped path.
-/// `urls` are tried in order for a GitHub repo.
+/// `urls` are tried in order for a repo; the config's `repo` is on GitHub.
 pub fn resolve_source(name: &str, version: &str, urls: &[&str]) -> Source {
     let entry = config::get(name);
-    let (owner, repo) = if !entry.repo.is_empty() {
+    let (forge, owner, repo) = if !entry.repo.is_empty() {
         let (owner, repo) = entry.repo.split_once('/').unwrap_or((&entry.repo, ""));
-        (owner.to_string(), repo.to_string())
+        (Forge::GitHub, owner.to_string(), repo.to_string())
     } else if entry.url.is_empty() {
         resolve_repo(urls).unwrap_or_default()
     } else {
@@ -46,6 +106,7 @@ pub fn resolve_source(name: &str, version: &str, urls: &[&str]) -> Source {
     Source {
         owner,
         repo,
+        forge,
         manual_url: template::expand(&entry.url, version),
         prereleases_only: entry.prerelease,
         commit_log: entry.commits,
@@ -101,10 +162,53 @@ fn parse_github_url(url: &str) -> Option<GitHubUrl<'_>> {
     })
 }
 
-fn resolve_repo(urls: &[&str]) -> Option<(String, String)> {
-    urls.iter()
-        .find_map(|url| parse_github_url(url))
-        .map(|parsed| (parsed.owner.to_string(), parsed.repo.to_string()))
+fn resolve_repo(urls: &[&str]) -> Option<(Forge, String, String)> {
+    urls.iter().find_map(|url| match parse_github_url(url) {
+        Some(parsed) => Some((
+            Forge::GitHub,
+            parsed.owner.to_string(),
+            parsed.repo.to_string(),
+        )),
+        None => parse_other_forge_url(url),
+    })
+}
+
+/// GitLab is any `gitlab.*` host. Its project paths can nest groups, so the
+/// path runs up to GitLab's `/-/` separator or a pre-separator route
+/// (`/uploads/`, `/repository/`); Tangled's is always `owner/repo`.
+fn parse_other_forge_url(url: &str) -> Option<(Forge, String, String)> {
+    const GITLAB_ROUTES: [&str; 2] = ["uploads", "repository"];
+    let parsed = Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let base = parsed.origin().ascii_serialization();
+    let path = parsed.path().trim_matches('/');
+    let mut segments: Vec<&str> = path
+        .split("/-/")
+        .next()?
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let forge = if host.starts_with("gitlab.") {
+        // Instance routes, not projects: the API and `/-/project/<id>/uploads`.
+        if matches!(segments.first(), Some(&"api" | &"-")) {
+            return None;
+        }
+        if let Some(route) = segments
+            .iter()
+            .position(|segment| GITLAB_ROUTES.contains(segment))
+        {
+            segments.truncate(route);
+        }
+        Forge::GitLab { base }
+    } else if host == "tangled.org" || host == "tangled.sh" {
+        segments.truncate(2);
+        Forge::Tangled { base }
+    } else {
+        return None;
+    };
+    let (repo, owner) = segments.split_last()?;
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    (!owner.is_empty() && !repo.is_empty()).then(|| (forge, owner.join("/"), repo.to_string()))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -140,8 +244,111 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resolve_repo_other_forges() {
+        let gitlab = |base: &str, owner: &str, repo: &str| {
+            Some((
+                Forge::GitLab { base: base.into() },
+                owner.to_string(),
+                repo.to_string(),
+            ))
+        };
+        let tangled = |owner: &str, repo: &str| {
+            Some((
+                Forge::Tangled {
+                    base: "https://tangled.org".into(),
+                },
+                owner.to_string(),
+                repo.to_string(),
+            ))
+        };
+        let cases = [
+            (
+                "https://gitlab.com/gitlab-org/cli",
+                gitlab("https://gitlab.com", "gitlab-org", "cli"),
+            ),
+            (
+                "https://gitlab.gnome.org/GNOME/glib/-/archive/2.86.0/glib-2.86.0.tar.gz",
+                gitlab("https://gitlab.gnome.org", "GNOME", "glib"),
+            ),
+            (
+                "https://gitlab.com/group/subgroup/project.git",
+                gitlab("https://gitlab.com", "group/subgroup", "project"),
+            ),
+            (
+                "https://gitlab.com/o/p/uploads/0123abcd/p-1.0.tar.gz",
+                gitlab("https://gitlab.com", "o", "p"),
+            ),
+            (
+                "https://gitlab.com/api/v4/projects/51547804/packages/generic/meld/1.0/x.dmg",
+                None,
+            ),
+            ("https://gitlab.com/only-a-group", None),
+            (
+                "https://gitlab.com/-/project/6808260/uploads/0123abcd/akku-1.0.tar.gz",
+                None,
+            ),
+            (
+                "https://tangled.org/rockorager.dev/lsr/archive/refs%2Ftags%2Fv1.0.0.tar.gz",
+                tangled("rockorager.dev", "lsr"),
+            ),
+            (
+                "https://tangled.org/tobinio.dev/cargo-features-manager.git",
+                tangled("tobinio.dev", "cargo-features-manager"),
+            ),
+            ("https://notgitlab.com/o/p", None),
+        ];
+        for (url, want) in cases {
+            assert_eq!(resolve_repo(&[url]), want, "{url}");
+        }
+    }
+
+    #[test]
+    fn repo_links_per_forge() {
+        let source = |forge| Source {
+            owner: "o".into(),
+            repo: "r".into(),
+            forge,
+            ..Default::default()
+        };
+        let github = source(Forge::GitHub);
+        assert_eq!(github.repo_url().as_deref(), Some("https://github.com/o/r"));
+        assert_eq!(
+            github.file_url("NEWS").as_deref(),
+            Some("https://github.com/o/r/blob/HEAD/NEWS")
+        );
+        assert_eq!(
+            github.releases_url().as_deref(),
+            Some("https://github.com/o/r/releases")
+        );
+        let gitlab = source(Forge::GitLab {
+            base: "https://gitlab.gnome.org".into(),
+        });
+        assert_eq!(
+            gitlab.file_url("NEWS").as_deref(),
+            Some("https://gitlab.gnome.org/o/r/-/blob/HEAD/NEWS")
+        );
+        assert_eq!(
+            gitlab.releases_url().as_deref(),
+            Some("https://gitlab.gnome.org/o/r/-/releases")
+        );
+        let tangled = source(Forge::Tangled {
+            base: "https://tangled.org".into(),
+        });
+        assert_eq!(
+            tangled.file_url("NEWS").as_deref(),
+            Some("https://tangled.org/o/r/blob/HEAD/NEWS")
+        );
+        assert_eq!(
+            tangled.releases_url().as_deref(),
+            Some("https://tangled.org/o/r/tags")
+        );
+        assert_eq!(Source::default().repo_url(), None);
+    }
+
+    #[test]
     fn resolve_repo_cases() {
-        let some = |owner: &str, repo: &str| Some((owner.to_string(), repo.to_string()));
+        let some =
+            |owner: &str, repo: &str| Some((Forge::GitHub, owner.to_string(), repo.to_string()));
         let cases = [
             (
                 "https://github.com/owner/repo",
@@ -164,7 +371,6 @@ mod tests {
                 "https://github.com/ggml-org/llama.cpp.git",
                 some("ggml-org", "llama.cpp"),
             ),
-            ("https://example.com", "https://gitlab.com/owner/repo", None),
             (
                 "https://docs.github.com/en/copilot/how-tos/copilot-cli",
                 "https://github.com/github/copilot-cli/releases/download/v1.0.0/copilot.tar.gz",

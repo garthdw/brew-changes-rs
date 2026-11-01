@@ -1,9 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures::future::join_all;
 use serde::Deserialize;
 
 use super::source::parse_github_file_url;
-use super::{Client, Release, Source};
+use super::{Client, Forge, Release, Source};
 use crate::changelog::{Order, Section, trim_to_range};
 use crate::template;
 use crate::version::matches_tag;
@@ -42,6 +42,33 @@ pub enum Changelog {
     },
     /// Newest first.
     Commits(Result<Vec<Commit>>),
+}
+
+/// A repo with what its forge's API needs resolved.
+pub(super) enum Remote<'a> {
+    GitHub {
+        owner: &'a str,
+        repo: &'a str,
+    },
+    /// `project` is the project's API URL, `web` its page.
+    GitLab {
+        project: String,
+        web: String,
+    },
+    Tangled {
+        xrpc: String,
+        did: String,
+    },
+}
+
+impl Remote<'_> {
+    fn name(&self) -> String {
+        match self {
+            Self::GitHub { owner, repo } => format!("{owner}/{repo}"),
+            Self::GitLab { web, .. } => web.clone(),
+            Self::Tangled { did, .. } => did.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,25 +135,35 @@ impl Client {
             return Changelog::NoSource;
         }
         if source.commit_log {
-            return Changelog::Commits(
-                self.fetch_commits(&source.owner, &source.repo, &installed, &current)
-                    .await,
-            );
+            return Changelog::Commits(match source.forge {
+                Forge::GitHub => {
+                    self.fetch_commits(&source.owner, &source.repo, &installed, &current)
+                        .await
+                }
+                _ => Err(anyhow!(
+                    "commit lists are only supported for GitHub repos, not {}",
+                    source.forge.name()
+                )),
+            });
         }
+        let remote = match self.remote(source).await {
+            Ok(remote) => remote,
+            Err(error) => {
+                return Changelog::Releases {
+                    fallback_file: None,
+                    file_error: None,
+                    result: Err(error),
+                };
+            }
+        };
 
         let mut fallback_file = None;
         let mut file_error = None;
         // A failed listing or file fetch still tries releases, which may work.
-        match self
-            .resolve_changelog_filename(&source.owner, &source.repo)
-            .await
-        {
+        match self.resolve_changelog_filename(&remote).await {
             Ok(Some(filename)) => {
                 on_stage(Stage::File(filename.clone()));
-                match self
-                    .fetch_github_file(&source.owner, &source.repo, &filename, None)
-                    .await
-                {
+                match self.fetch_repo_file(&remote, &filename).await {
                     Ok(content) => {
                         if let Section {
                             text: section,
@@ -156,13 +193,7 @@ impl Client {
 
         on_stage(Stage::Releases);
         let result = self
-            .fetch_releases(
-                &source.owner,
-                &source.repo,
-                &installed,
-                &current,
-                source.prereleases_only,
-            )
+            .fetch_forge_releases(&remote, &installed, &current, source.prereleases_only)
             .await
             .map(|list| Releases {
                 found: list
@@ -208,20 +239,108 @@ impl Client {
         }
     }
 
-    /// One root listing instead of probing each filename, which adds seconds
-    /// on repos where the first candidates miss. The most recently committed
-    /// candidate wins, being the one still maintained.
-    async fn resolve_changelog_filename(&self, owner: &str, repo: &str) -> Result<Option<String>> {
+    async fn remote<'a>(&self, source: &'a Source) -> Result<Remote<'a>> {
+        let (owner, repo) = (&source.owner, &source.repo);
+        Ok(match &source.forge {
+            Forge::GitHub => Remote::GitHub { owner, repo },
+            Forge::GitLab { base } => Remote::GitLab {
+                project: format!(
+                    "{base}/api/v4/projects/{}",
+                    format!("{owner}/{repo}").replace('/', "%2F")
+                ),
+                web: format!("{base}/{owner}/{repo}"),
+            },
+            Forge::Tangled { base } => self
+                .resolve_tangled(base, owner, repo)
+                .await
+                .with_context(|| format!("resolving the Tangled repo {owner}/{repo}"))?,
+        })
+    }
+
+    /// Tangled's API takes the repo's DID rather than its name; the web raw
+    /// file route redirects to the API with it, whether or not the file exists.
+    async fn resolve_tangled(
+        &self,
+        base: &str,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Remote<'static>> {
+        let response = self
+            .http
+            .get(format!("{base}/{owner}/{repo}/raw/HEAD/README.md"))
+            .send()
+            .await?;
+        let api = response.url();
+        let did = api
+            .query_pairs()
+            .find(|(key, _)| key == "repo")
+            .map(|(_, did)| did.into_owned())
+            .with_context(|| format!("no repo DID in {api}"))?;
+        Ok(Remote::Tangled {
+            xrpc: format!("{}/xrpc", api.origin().ascii_serialization()),
+            did,
+        })
+    }
+
+    /// Only regular files, so a `NEWS/` directory isn't taken for a changelog.
+    async fn list_root(&self, remote: &Remote<'_>) -> Result<Vec<String>> {
         #[derive(Deserialize)]
         struct Entry {
             name: String,
-            #[serde(rename = "type")]
+            #[serde(rename = "type", default)]
             kind: String,
+            #[serde(default)]
+            mode: String,
         }
-        let entries: Vec<Entry> = self
-            .get_json(&self.repo_url(owner, repo, "contents/"))
-            .await
-            .with_context(|| format!("listing contents for {owner}/{repo}"))?;
+        #[derive(Deserialize)]
+        struct Tree {
+            entries: Vec<Entry>,
+        }
+        let (url, is_file): (String, fn(&Entry) -> bool) = match remote {
+            Remote::GitHub { owner, repo } => (self.repo_url(owner, repo, "contents/"), |entry| {
+                entry.kind == "file"
+            }),
+            Remote::GitLab { project, .. } => {
+                (format!("{project}/repository/tree?per_page=100"), |entry| {
+                    entry.kind == "blob"
+                })
+            }
+            Remote::Tangled { xrpc, did } => (
+                format!("{xrpc}/org.tangled.temp.git.getTree?repo={did}&ref=HEAD&path="),
+                // Git modes: 0100644/0100755 are files, 0040000 directories.
+                |entry| entry.mode.starts_with("010"),
+            ),
+        };
+        let entries = match remote {
+            Remote::Tangled { .. } => self.get_json::<Tree>(&url).await.map(|tree| tree.entries),
+            _ => self.get_json::<Vec<Entry>>(&url).await,
+        }
+        .with_context(|| format!("listing files of {}", remote.name()))?;
+        Ok(entries
+            .into_iter()
+            .filter(is_file)
+            .map(|entry| entry.name)
+            .collect())
+    }
+
+    async fn fetch_repo_file(&self, remote: &Remote<'_>, filename: &str) -> Result<String> {
+        let url = match remote {
+            Remote::GitHub { owner, repo } => {
+                return self.fetch_github_file(owner, repo, filename, None).await;
+            }
+            Remote::GitLab { web, .. } => format!("{web}/-/raw/HEAD/{filename}"),
+            Remote::Tangled { xrpc, did } => {
+                format!("{xrpc}/org.tangled.temp.git.getBlob?repo={did}&ref=HEAD&path={filename}")
+            }
+        };
+        Ok(self.fetch_raw(&url).await?.0)
+    }
+
+    /// One root listing instead of probing each filename, which adds seconds
+    /// on repos where the first candidates miss. On GitHub the most recently
+    /// committed candidate wins, being the one still maintained.
+    async fn resolve_changelog_filename(&self, remote: &Remote<'_>) -> Result<Option<String>> {
+        let files = self.list_root(remote).await?;
         let matches: Vec<String> = BASE_NAMES
             .iter()
             .flat_map(|base| {
@@ -229,12 +348,11 @@ impl Client {
                     .iter()
                     .map(move |extension| format!("{base}{extension}"))
             })
-            .filter(|name| {
-                entries
-                    .iter()
-                    .any(|entry| entry.kind == "file" && entry.name == *name)
-            })
+            .filter(|name| files.contains(name))
             .collect();
+        let Remote::GitHub { owner, repo } = remote else {
+            return Ok(matches.into_iter().next());
+        };
         if matches.len() <= 1 {
             return Ok(matches.into_iter().next());
         }
@@ -374,8 +492,12 @@ fn rfc3339(unix_seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::Release;
+    use crate::github::source::Forge;
     use base64::Engine;
     use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::OnceCell;
     use wiremock::matchers::{path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -395,6 +517,11 @@ mod tests {
         let client = Client::for_test(&server.uri());
         (server, client)
     }
+
+    const GITHUB_REPO: Remote<'static> = Remote::GitHub {
+        owner: "o",
+        repo: "r",
+    };
 
     fn listing(names: &[&str]) -> serde_json::Value {
         names
@@ -535,7 +662,7 @@ mod tests {
         .await;
         assert_eq!(
             client
-                .resolve_changelog_filename("o", "r")
+                .resolve_changelog_filename(&GITHUB_REPO)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -554,7 +681,7 @@ mod tests {
         .await;
         assert_eq!(
             client
-                .resolve_changelog_filename("o", "r")
+                .resolve_changelog_filename(&GITHUB_REPO)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -572,7 +699,10 @@ mod tests {
         )
         .await;
         assert_eq!(
-            client.resolve_changelog_filename("o", "r").await.unwrap(),
+            client
+                .resolve_changelog_filename(&GITHUB_REPO)
+                .await
+                .unwrap(),
             None
         );
     }
@@ -587,7 +717,10 @@ mod tests {
         )
         .await;
         assert_eq!(
-            client.resolve_changelog_filename("o", "r").await.unwrap(),
+            client
+                .resolve_changelog_filename(&GITHUB_REPO)
+                .await
+                .unwrap(),
             None
         );
     }
@@ -613,7 +746,7 @@ mod tests {
         }
         assert_eq!(
             client
-                .resolve_changelog_filename("o", "r")
+                .resolve_changelog_filename(&GITHUB_REPO)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -644,7 +777,7 @@ mod tests {
             .await;
         assert_eq!(
             client
-                .resolve_changelog_filename("o", "r")
+                .resolve_changelog_filename(&GITHUB_REPO)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -659,7 +792,12 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        assert!(client.resolve_changelog_filename("o", "r").await.is_err());
+        assert!(
+            client
+                .resolve_changelog_filename(&GITHUB_REPO)
+                .await
+                .is_err()
+        );
     }
 
     /// A repo whose CHANGELOG.md only documents `changelog_version`.
@@ -890,6 +1028,232 @@ mod tests {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339(1_793_383_622), "2026-10-30T18:07:02Z");
+    }
+
+    fn gitlab(server: &MockServer) -> Source {
+        Source {
+            forge: Forge::GitLab { base: server.uri() },
+            ..repo()
+        }
+    }
+
+    const GITLAB_PROJECT: &str = "/api/v4/projects/o%2Fr";
+
+    #[tokio::test]
+    async fn gitlab_changelog_file() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            &format!("{GITLAB_PROJECT}/repository/tree"),
+            json!([{"name": "src", "type": "tree"}, {"name": "NEWS", "type": "blob"}]),
+        )
+        .await;
+        Mock::given(path("/o/r/-/raw/HEAD/NEWS"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("## 2.0.0\nnotes\n## 1.0.0\nold\n", "text/plain"),
+            )
+            .mount(&server)
+            .await;
+        let got = client
+            .fetch(&gitlab(&server), "1.0.0", "2.0.0", |_| {})
+            .await;
+        let Changelog::File {
+            filename, section, ..
+        } = got
+        else {
+            panic!("not a file: {got:?}");
+        };
+        assert_eq!(
+            (filename.as_str(), section.as_str()),
+            ("NEWS", "## 2.0.0\nnotes")
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_releases() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            &format!("{GITLAB_PROJECT}/repository/tree"),
+            json!([]),
+        )
+        .await;
+        serve(
+            &server,
+            &format!("{GITLAB_PROJECT}/releases"),
+            json!([
+                {"tag_name": "v2.0.0", "description": "new", "released_at": "2026-01-01T00:00:00Z"},
+                {"tag_name": "v1.0.0", "description": "old"},
+            ]),
+        )
+        .await;
+        let got = client
+            .fetch(&gitlab(&server), "1.0.0", "2.0.0", |_| {})
+            .await;
+        let (_, releases) = releases(got);
+        assert!(releases.found);
+        assert_eq!(
+            releases.list,
+            [Release {
+                tag_name: "v2.0.0".into(),
+                body: "new".into(),
+                published_at: "2026-01-01T00:00:00Z".into(),
+                ..Default::default()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_tags_when_no_releases() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            &format!("{GITLAB_PROJECT}/repository/tree"),
+            json!([]),
+        )
+        .await;
+        serve(&server, &format!("{GITLAB_PROJECT}/releases"), json!([])).await;
+        Mock::given(path(format!("{GITLAB_PROJECT}/repository/tags")))
+            .and(query_param("order_by", "version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"name": "v2.0.0", "message": "tagged", "release": {"description": "notes"}},
+                {"name": "v1.5.0", "message": "tagged 1.5", "release": null},
+                {"name": "v1.0.0", "message": ""},
+            ])))
+            .mount(&server)
+            .await;
+        let got = client
+            .fetch(&gitlab(&server), "1.0.0", "2.0.0", |_| {})
+            .await;
+        let (_, releases) = releases(got);
+        assert_eq!(
+            releases
+                .list
+                .iter()
+                .map(|release| (release.tag_name.as_str(), release.body.as_str()))
+                .collect::<Vec<_>>(),
+            [("v2.0.0", "notes"), ("v1.5.0", "tagged 1.5")]
+        );
+    }
+
+    #[tokio::test]
+    async fn github_token_is_not_sent_to_other_forges() {
+        let (gitlab_server, _) = setup().await;
+        let (_github_server, mut client) = setup().await;
+        client.token = Arc::new(OnceCell::new_with(Some(Some("secret".into()))));
+        serve(
+            &gitlab_server,
+            &format!("{GITLAB_PROJECT}/repository/tree"),
+            json!([]),
+        )
+        .await;
+        serve(
+            &gitlab_server,
+            &format!("{GITLAB_PROJECT}/releases"),
+            json!([]),
+        )
+        .await;
+        client
+            .fetch(&gitlab(&gitlab_server), "1.0.0", "2.0.0", |_| {})
+            .await;
+        let requests = gitlab_server.received_requests().await.unwrap();
+        assert!(!requests.is_empty());
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.headers.contains_key("authorization")),
+            "{requests:?}"
+        );
+    }
+
+    /// Tangled's API takes the repo's DID, which its raw-file redirect reveals.
+    async fn tangled_server() -> (MockServer, Client, Source) {
+        let (server, client) = setup().await;
+        Mock::given(path("/o/r/raw/HEAD/README.md"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "location",
+                format!(
+                    "{}/xrpc/org.tangled.temp.git.getBlob?repo=did%3Aplc%3Aabc&ref=HEAD&path=README.md",
+                    server.uri()
+                ),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(path("/xrpc/org.tangled.temp.git.getBlob"))
+            .and(query_param("path", "README.md"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let source = Source {
+            forge: Forge::Tangled { base: server.uri() },
+            ..repo()
+        };
+        (server, client, source)
+    }
+
+    #[tokio::test]
+    async fn tangled_changelog_file() {
+        let (server, client, source) = tangled_server().await;
+        Mock::given(path("/xrpc/org.tangled.temp.git.getTree"))
+            .and(query_param("repo", "did:plc:abc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"entries": [
+                {"name": "src", "mode": "0040000"},
+                {"name": "CHANGELOG.md", "mode": "0100644"},
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(path("/xrpc/org.tangled.temp.git.getBlob"))
+            .and(query_param("repo", "did:plc:abc"))
+            .and(query_param("path", "CHANGELOG.md"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("## 0.12.0\nnew\n## 0.11.1\nold\n", "text/plain"),
+            )
+            .mount(&server)
+            .await;
+        let got = client.fetch(&source, "0.11.1", "0.12.0", |_| {}).await;
+        let Changelog::File { section, .. } = got else {
+            panic!("not a file: {got:?}");
+        };
+        assert_eq!(section, "## 0.12.0\nnew");
+    }
+
+    #[tokio::test]
+    async fn tangled_tags() {
+        let (server, client, source) = tangled_server().await;
+        serve(
+            &server,
+            "/xrpc/org.tangled.temp.git.getTree",
+            json!({"entries": []}),
+        )
+        .await;
+        Mock::given(path("/xrpc/org.tangled.temp.git.listTags"))
+            .and(query_param("repo", "did:plc:abc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"tags": [
+                {
+                    "name": "v2.0.0",
+                    "annotation": {
+                        "message": "two\n-----BEGIN SSH SIGNATURE-----\nxx\n-----END SSH SIGNATURE-----\n",
+                        "tagger": {"when": "2026-06-19T21:15:47.000000-05:00"},
+                    },
+                },
+                {"name": "v1.0.0", "author": {"when": "2025-01-01T00:00:00Z"}},
+            ]})))
+            .mount(&server)
+            .await;
+        let got = client.fetch(&source, "1.0.0", "2.0.0", |_| {}).await;
+        let (_, releases) = releases(got);
+        assert!(releases.found);
+        assert_eq!(
+            releases.list,
+            [Release {
+                tag_name: "v2.0.0".into(),
+                body: "two".into(),
+                published_at: "2026-06-19T21:15:47.000000-05:00".into(),
+                ..Default::default()
+            }]
+        );
     }
 
     #[tokio::test]

@@ -46,25 +46,24 @@ impl Item {
         if self.is_cask { "cask" } else { "formula" }
     }
 
-    pub fn github_url(&self) -> Option<String> {
-        self.source.github_url()
+    pub fn repo_url(&self) -> Option<String> {
+        self.source.repo_url()
     }
 
     pub fn changelog_url(&self) -> Option<String> {
         if !self.source.manual_url.is_empty() {
             return Some(self.source.manual_url.clone());
         }
-        let github = self.github_url()?;
-        Some(match &self.changelog_filename {
-            Some(filename) => format!("{github}/blob/HEAD/{filename}"),
-            None => format!("{github}/releases"),
-        })
+        match &self.changelog_filename {
+            Some(filename) => self.source.file_url(filename),
+            None => self.source.releases_url(),
+        }
     }
 
     pub fn homepage_url(&self) -> Option<String> {
         Some(self.homepage.clone())
             .filter(|homepage| !homepage.is_empty())
-            .or_else(|| self.github_url())
+            .or_else(|| self.repo_url())
     }
 }
 
@@ -364,7 +363,7 @@ impl App {
             Action::OpenHomepage => {
                 return item.homepage_url().map(Effect::Open).into_iter().collect();
             }
-            Action::OpenGithub => return item.github_url().map(Effect::Open).into_iter().collect(),
+            Action::OpenGithub => return item.repo_url().map(Effect::Open).into_iter().collect(),
             Action::OpenChangelog => {
                 return item.changelog_url().map(Effect::Open).into_iter().collect();
             }
@@ -479,9 +478,11 @@ fn body_markdown(item: &Item) -> Option<String> {
 
 pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
     let manual = &item.source.manual_url;
+    let forge = item.source.forge.name();
+    let releases = item.source.forge.releases_label();
     match changelog {
         Changelog::NoSource => {
-            "No GitHub repository could be resolved for this package; changelog unavailable.".into()
+            "No repository could be resolved for this package; changelog unavailable.".into()
         }
         Changelog::ManualHtmlWithoutVersion => format!(
             "The configured changelog is an HTML page that doesn't appear to document {}.\n\nKnown changelog: {manual}",
@@ -498,7 +499,7 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
             result: Ok(Releases { list, .. }),
             ..
         } if !list.is_empty() => {
-            let mut text = String::from("(from GitHub releases)\n\n");
+            let mut text = format!("(from {releases})\n\n");
             for release in list.iter().take(MAX_DISPLAYED_RELEASES) {
                 let date = if release.published_at.is_empty() {
                     "unknown date"
@@ -516,13 +517,13 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
         }
         Changelog::Releases {
             result: Err(error), ..
-        } => format!("Could not fetch GitHub releases.\n\n{error:#}"),
+        } => format!("Could not fetch {releases}.\n\n{error:#}"),
         Changelog::Releases {
             fallback_file,
             file_error: Some(error),
             ..
         } => format!(
-            "Could not fetch {}, and no GitHub release matches {}.\n\n{error:#}",
+            "Could not fetch {}, and no {forge} release matches {}.\n\n{error:#}",
             fallback_file
                 .as_deref()
                 .unwrap_or("the repository's file listing"),
@@ -532,20 +533,20 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
             fallback_file: Some(filename),
             ..
         } => format!(
-            "{filename} doesn't document {}, and no GitHub release matches it.",
+            "{filename} doesn't document {}, and no {forge} release matches it.",
             item.current
         ),
         Changelog::Releases { result: Ok(_), .. } if item.source.prereleases_only => {
-            "No GitHub pre-releases found for this package.".into()
+            format!("No {forge} pre-releases found for this package.")
         }
         Changelog::Releases { .. } => {
-            "No changelog file or GitHub releases found for this package.".into()
+            format!("No changelog file or {releases} found for this package.")
         }
         Changelog::Commits(Ok(commits)) if commits.is_empty() => {
             "No commits found between these versions.".into()
         }
         Changelog::Commits(Ok(commits)) => {
-            let repo_url = item.source.github_url().unwrap_or_default();
+            let repo_url = item.source.repo_url().unwrap_or_default();
             let mut text = String::from("(from GitHub commits)\n\n");
             for commit in commits {
                 text += &format!(
@@ -565,7 +566,7 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{Commit, Release};
+    use crate::github::{Commit, Forge, Release};
     use crate::ui::theme::ThemeConfig;
 
     fn items(n: usize) -> Vec<Item> {
@@ -1063,7 +1064,7 @@ mod tests {
         let none = changelog_body(&Item::default(), &Changelog::NoSource);
         assert_eq!(
             none,
-            "No GitHub repository could be resolved for this package; changelog unavailable."
+            "No repository could be resolved for this package; changelog unavailable."
         );
 
         let err = Changelog::ManualFailed(anyhow::anyhow!("boom"));
@@ -1176,6 +1177,47 @@ mod tests {
             "(from GitHub releases)\n\n### v0 (unknown date)\n\n_no release notes_\n\n"
         ));
         assert_eq!(body.matches("### ").count(), 10);
+    }
+
+    #[test]
+    fn other_forge_links_and_labels() {
+        let mut item = Item {
+            source: Source {
+                owner: "GNOME".into(),
+                repo: "glib".into(),
+                forge: Forge::GitLab {
+                    base: "https://gitlab.gnome.org".into(),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            item.changelog_url().as_deref(),
+            Some("https://gitlab.gnome.org/GNOME/glib/-/releases")
+        );
+        item.changelog_filename = Some("NEWS".into());
+        assert_eq!(
+            item.changelog_url().as_deref(),
+            Some("https://gitlab.gnome.org/GNOME/glib/-/blob/HEAD/NEWS")
+        );
+        let changelog = Changelog::Releases {
+            fallback_file: None,
+            file_error: None,
+            result: Ok(Releases {
+                list: vec![Release {
+                    tag_name: "2.86.0".into(),
+                    body: "notes".into(),
+                    ..Default::default()
+                }],
+                found: true,
+            }),
+        };
+        assert!(
+            changelog_body(&item, &changelog).starts_with("(from GitLab releases)\n\n"),
+            "{}",
+            changelog_body(&item, &changelog)
+        );
     }
 
     #[test]

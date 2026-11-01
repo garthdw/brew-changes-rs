@@ -15,7 +15,7 @@ use super::app::{App, FOOTER_LINES, Item, Popup, Upgrade};
 use super::keys::{self, Action};
 use super::markdown::{self, Link};
 use super::theme::Theme;
-use crate::github::Stage;
+use crate::github::{Forge, Stage};
 
 /// A popup's borders and padding, in lines.
 pub const POPUP_CHROME: u16 = 4;
@@ -80,7 +80,7 @@ const HELP_ROWS: [(&[Action], &str); 11] = [
     ),
     (&[Action::ToggleExpand], "expand/collapse"),
     (&[Action::OpenHomepage], "open homepage"),
-    (&[Action::OpenGithub], "open github"),
+    (&[Action::OpenGithub], "open repo"),
     (&[Action::OpenChangelog], "open changelog"),
     (&[Action::UpgradeAll], "upgrade all"),
     (&[Action::UpgradeCurrent], "upgrade current"),
@@ -176,8 +176,15 @@ fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
         );
     }
     let source = &item.source;
-    let source_hint = if source.has_repo() {
+    let source_hint = if let Forge::GitHub = source.forge
+        && source.has_repo()
+    {
         format!("[{}/{}]", source.owner, source.repo)
+    } else if let Some(url) = source.repo_url() {
+        format!(
+            "[{}]",
+            url.split_once("://").map_or(url.as_str(), |(_, rest)| rest)
+        )
     } else if !source.manual_url.is_empty() {
         "[known changelog]".into()
     } else {
@@ -237,7 +244,7 @@ fn frame(content: Vec<Line<'static>>, theme: &Theme) -> Vec<Line<'static>> {
 /// first until they fit.
 pub fn hints(app: &App) -> String {
     let item = app.items.get(app.cursor);
-    let github = item.and_then(Item::github_url);
+    let repo = item.and_then(Item::repo_url);
     let candidates = [
         (Action::ToggleExpand, "expand/collapse", 100, true),
         (
@@ -245,10 +252,10 @@ pub fn hints(app: &App) -> String {
             "open homepage",
             10,
             item.is_some_and(|item| {
-                !item.homepage.is_empty() && Some(&item.homepage) != github.as_ref()
+                !item.homepage.is_empty() && Some(&item.homepage) != repo.as_ref()
             }),
         ),
-        (Action::OpenGithub, "open github", 20, github.is_some()),
+        (Action::OpenGithub, "open repo", 20, repo.is_some()),
         (
             Action::OpenChangelog,
             "open changelog",
@@ -686,7 +693,7 @@ mod tests {
         };
         assert_eq!(
             hints(&app(vec![github_item.clone()], 200)),
-            "[enter] expand/collapse  [o] open homepage  [g] open github  [c] open changelog  [a] upgrade all  [u] upgrade current  [?] help  [q] quit"
+            "[enter] expand/collapse  [o] open homepage  [g] open repo  [c] open changelog  [a] upgrade all  [u] upgrade current  [?] help  [q] quit"
         );
         assert_eq!(
             hints(&app(vec![github_item], 60)),
