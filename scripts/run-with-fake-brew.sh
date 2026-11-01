@@ -71,25 +71,11 @@ cat >"$dir/info-cask.json" <<'EOF'
 ]}
 EOF
 
-cat >"$dir/bin/brew" <<EOF
-#!/bin/sh
-dir='$dir'
-echo "\$*" >>"\$dir/brew-calls.log"
-case "\$1 \$3" in
-  outdated*) cat "\$dir/outdated.json" ;;
-  "info --formula") cat "\$dir/info-formula.json" ;;
-  "info --cask") cat "\$dir/info-cask.json" ;;
-  upgrade*)
-    sleep "\${FAKE_BREW_UPGRADE_SECONDS:-1}"
-    if [ -n "\${FAKE_BREW_UPGRADE_FAIL:-}" ]; then
-      echo "Error: fake upgrade failure for \$*" >&2
-      exit 1
-    fi
-    echo "fake brew: \$*" ;;
-  *) exit 1 ;;
-esac
-EOF
-chmod +x "$dir/bin/brew"
+cp "$repo/scripts/fake-brew" "$dir/bin/brew"
+if [ -n "${FAKE_BREW_UPGRADE_FAIL:-}" ]; then
+  echo "Error: fake upgrade failure" >"$dir/upgrade-stderr"
+fi
+export FAKE_BREW_UPGRADE_SECONDS="${FAKE_BREW_UPGRADE_SECONDS:-1}"
 
 cat >"$dir/github.py" <<'EOF'
 import json

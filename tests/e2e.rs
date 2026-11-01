@@ -49,27 +49,7 @@ fn brew_shim(test: &str, outdated: Value) -> Result<PathBuf> {
             .to_string(),
     )?;
     let shim = dir.join("bin/brew");
-    fs::write(
-        &shim,
-        format!(
-            r#"#!/bin/sh
-dir='{}'
-echo "$*" >> "$dir/calls.log"
-case "$1 $3" in
-  outdated*) cat "$dir/outdated.json" ;;
-  "info --formula") cat "$dir/info-formula.json" ;;
-  "info --cask") cat "$dir/info-cask.json" ;;
-  upgrade*)
-    if [ -f "$dir/upgrade-stderr" ]; then
-      cat "$dir/upgrade-stderr" >&2
-      exit 1
-    fi ;;
-  *) exit 1 ;;
-esac
-"#,
-            dir.display()
-        ),
-    )?;
+    fs::write(&shim, include_str!("../scripts/fake-brew"))?;
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))?;
     Ok(dir)
 }

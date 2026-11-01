@@ -16,7 +16,7 @@
 # version from homebrew/core and overwrites the patched receipt).
 #
 # Usage: scripts/downgrade-for-testing.sh [formula...]
-#   With no arguments, downgrades every formula known to downgrade_commit().
+#   With no arguments, downgrades every formula in DOWNGRADES.
 
 set -euo pipefail
 
@@ -26,18 +26,19 @@ set -euo pipefail
 #     | grep -E '"sha"|"message"'
 # and picking the commit for the version before the one currently installed.
 #
-# Plain case statement rather than an associative array: macOS's default
-# /bin/bash is 3.2, which predates bash 4's `declare -A`.
+# One "name commit" line per formula rather than an associative array:
+# macOS's default /bin/bash is 3.2, which predates bash 4's `declare -A`.
+DOWNGRADES="
+jq  76881a708efb7c3667f0b3a0c44237d4a466db86  # jq 1.8.1 (current: 1.8.2)
+bat 1664b3e4774d707b76b0ed02ef0863f307ad5199  # bat 0.26.0 (current: 0.26.1)
+"
+
 known_formulae() {
-  echo "jq bat"
+  echo "$DOWNGRADES" | awk 'NF { printf "%s%s", separator, $1; separator = " " }'
 }
 
 downgrade_commit() {
-  case "$1" in
-    jq) echo "76881a708efb7c3667f0b3a0c44237d4a466db86" ;;   # jq 1.8.1 (current: 1.8.2)
-    bat) echo "1664b3e4774d707b76b0ed02ef0863f307ad5199" ;;  # bat 0.26.0 (current: 0.26.1)
-    *) echo "" ;;
-  esac
+  echo "$DOWNGRADES" | awk -v name="$1" '$1 == name { print $2 }'
 }
 
 TAP_OWNER="$(whoami)"
