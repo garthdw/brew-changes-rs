@@ -45,8 +45,8 @@ goreleaser release --snapshot --skip=publish --clean   # stages prebuilt/brew-ch
 ## Architecture
 
 - `homebrew`: `brew outdated`/`brew info` JSON (info batched 50 per call, 8 at once, failing batches bisected), `brew upgrade`.
-- `github::resolve_source` is the single place a changelog source is chosen: the `src/changelog_config.json` override, else GitHub auto-detection. The app and `validate-changelogs` both use it.
-- `github::Client::fetch`: manual URL, else the repo's changelog file (one root listing), else releases (tags fallback), returning a `Changelog` enum with one variant per outcome. `Client` holds the API/raw base URLs so tests point it at `wiremock`.
+- `github::resolve_source` is the single place a changelog source is chosen: the `src/changelog_config.json` override, else auto-detecting a GitHub, GitLab (any `gitlab.*` host) or Tangled repo into `Source::forge`. The app and `validate-changelogs` both use it.
+- `github::Client::fetch`: manual URL, else the repo's changelog file (one root listing), else releases (tags fallback), resolved per forge through a `Remote` (Tangled needs its repo DID first), returning a `Changelog` enum with one variant per outcome. `Client` holds the API/raw base URLs so tests point it at `wiremock`.
 - `changelog::trim_to_range`, `template` and `version`: heading detection, the per-entry `url`/`version`/`heading` templates, and version/tag matching.
 - `ui::app`: state plus a pure `update(Message) -> Vec<Effect>`; UI behaviour is tested there without a terminal. It caches each expanded body already framed. `ui::run` executes effects on tokio and feeds results back as `Message`s. `ui::view::lines_in` builds only the visible window from the cached frames; `ui::markdown` renders Markdown with pulldown-cmark.
 - `tests/e2e.rs` runs the real binary in a detached tmux session (tmux required) with a `brew` shim on `PATH` and `BREW_CHANGES_GITHUB_API` pointing `Client::new` at a `wiremock` server.
