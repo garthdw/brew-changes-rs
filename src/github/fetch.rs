@@ -231,20 +231,6 @@ impl Client {
         installed: &str,
         current: &str,
     ) -> Result<Vec<Commit>> {
-        #[derive(Deserialize)]
-        struct Entry {
-            sha: String,
-            commit: Inner,
-        }
-        #[derive(Deserialize)]
-        struct Inner {
-            message: String,
-            committer: Committer,
-        }
-        #[derive(Deserialize)]
-        struct Committer {
-            date: String,
-        }
         let commit_time = |version: &str| {
             version
                 .rsplit('.')
@@ -264,7 +250,7 @@ impl Client {
         for _ in 0..MAX_COMMIT_PAGES {
             let Some(url) = next.take() else { break };
             let (entries, next_url) = self
-                .get_json_page::<Vec<Entry>>(&url)
+                .get_json_page::<Vec<CommitEntry>>(&url)
                 .await
                 .with_context(|| format!("listing commits for {owner}/{repo}"))?;
             next = next_url;
@@ -292,25 +278,33 @@ impl Client {
         repo: &str,
         filename: &str,
     ) -> Option<String> {
-        #[derive(Deserialize)]
-        struct Commit {
-            commit: Inner,
-        }
-        #[derive(Deserialize)]
-        struct Inner {
-            committer: Committer,
-        }
-        #[derive(Deserialize)]
-        struct Committer {
-            date: String,
-        }
         let url = self.repo_url(owner, repo, &format!("commits?path={filename}&per_page=1"));
-        let commits: Vec<Commit> = self.get_json(&url).await.ok()?;
+        let commits: Vec<CommitEntry> = self.get_json(&url).await.ok()?;
         commits
             .into_iter()
             .next()
             .map(|commit| commit.commit.committer.date)
     }
+}
+
+/// A commit as GitHub's commits API lists it.
+#[derive(Deserialize)]
+struct CommitEntry {
+    #[serde(default)]
+    sha: String,
+    commit: CommitDetails,
+}
+
+#[derive(Deserialize)]
+struct CommitDetails {
+    #[serde(default)]
+    message: String,
+    committer: Committer,
+}
+
+#[derive(Deserialize)]
+struct Committer {
+    date: String,
 }
 
 /// Howard Hinnant's `civil_from_days`, to avoid a date crate for one format.
@@ -349,6 +343,7 @@ mod tests {
     use crate::github::forge::GitHub;
     use crate::github::gitlab::GitLab;
     use crate::github::tangled::Tangled;
+    use crate::github::test_support::{serve, setup};
     use base64::Engine;
     use serde_json::json;
     use std::sync::Arc;
@@ -360,25 +355,12 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(text)
     }
 
-    async fn serve(server: &MockServer, route: &str, body: serde_json::Value) {
-        Mock::given(path(route))
-            .respond_with(ResponseTemplate::new(200).set_body_json(body))
-            .mount(server)
-            .await;
-    }
-
-    async fn setup() -> (MockServer, Client) {
-        let server = MockServer::start().await;
-        let client = Client::for_test(&server.uri());
-        (server, client)
-    }
-
     const GITHUB_REPO: fn() -> GitHub = || GitHub::new("o", "r");
 
     fn listing(names: &[&str]) -> serde_json::Value {
         names
             .iter()
-            .map(|name| json!({"name": name, "type": "file"}))
+            .map(|name| json!({"name": name, "path": name, "type": "file"}))
             .collect()
     }
 
@@ -405,7 +387,7 @@ mod tests {
     }
 
     fn repo() -> Source {
-        Source::with_forge(GitHub::new("o", "r"))
+        Source::with_forge(GITHUB_REPO())
     }
 
     #[tokio::test]

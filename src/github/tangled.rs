@@ -4,15 +4,13 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 use tokio::sync::OnceCell;
 
-use super::forge::{Forge, Range};
+use super::forge::{Forge, Range, Repo};
 use super::releases::null_as_default;
 use super::{Client, Release};
 
 #[derive(Debug)]
 pub struct Tangled {
-    base: String,
-    owner: String,
-    repo: String,
+    repo: Repo,
     api: OnceCell<Api>,
 }
 
@@ -25,9 +23,7 @@ struct Api {
 impl Tangled {
     pub fn new(base: impl Into<String>, owner: impl Into<String>, repo: impl Into<String>) -> Self {
         Self {
-            base: base.into(),
-            owner: owner.into(),
-            repo: repo.into(),
+            repo: Repo::new(base, owner, repo),
             api: OnceCell::new(),
         }
     }
@@ -64,11 +60,11 @@ impl Forge for Tangled {
     }
 
     fn path(&self) -> String {
-        format!("{}/{}", self.owner, self.repo)
+        self.repo.path()
     }
 
     fn repo_url(&self) -> String {
-        format!("{}/{}", self.base, self.path())
+        self.repo.url()
     }
 
     fn releases_url(&self) -> String {
@@ -138,9 +134,7 @@ impl Forge for Tangled {
                 .fetch_pages::<TangledTags>(
                     format!("{xrpc}/org.tangled.temp.git.listTags?repo={did}&limit=100"),
                     TangledTag::into_release,
-                    range.installed,
-                    range.target,
-                    range.prereleases_only,
+                    range,
                 )
                 .await?
                 .releases)

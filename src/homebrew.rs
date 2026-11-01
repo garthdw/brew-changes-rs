@@ -14,7 +14,7 @@ const INFO_BATCH_SIZE: usize = 50;
 const INFO_CONCURRENCY: usize = 8;
 
 /// Versions are in upstream form (see `upstream_version`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Package {
     pub name: String,
     pub installed: String,
@@ -76,7 +76,7 @@ fn parse_outdated(json: &[u8]) -> Result<Vec<Package>> {
 
 /// Upstream tags never include a formula's "_N" revision ("2.51.0_1") or a
 /// cask's ",build" (docker-desktop's "4.95.0,242831").
-pub fn upstream_version(version: &str, is_cask: bool) -> String {
+fn upstream_version(version: &str, is_cask: bool) -> String {
     if is_cask {
         return version.split(',').next().unwrap_or_default().to_string();
     }

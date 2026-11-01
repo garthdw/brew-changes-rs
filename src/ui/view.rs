@@ -185,7 +185,14 @@ fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
     };
     let mut spans = vec![
         Span::styled(if index == app.cursor { "> " } else { "  " }, cursor),
-        Span::styled(format!("{} ({})", item.name, item.kind()), name),
+        Span::styled(
+            format!(
+                "{} ({})",
+                item.name,
+                if item.is_cask { "cask" } else { "formula" }
+            ),
+            name,
+        ),
         Span::raw("  "),
         Span::styled(item.installed.clone(), version),
         Span::raw(" -> "),
@@ -237,7 +244,7 @@ fn frame(content: Vec<Line<'static>>, theme: &Theme) -> Vec<Line<'static>> {
 /// first until they fit.
 pub fn hints(app: &App) -> String {
     let item = app.items.get(app.cursor);
-    let repo = item.and_then(Item::repo_url);
+    let repo = item.and_then(|item| item.source.repo_url());
     let candidates = [
         (Action::ToggleExpand, "expand/collapse", 100, true),
         (
@@ -431,9 +438,8 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
         Line::raw(""),
     ];
     for (key, (_, label)) in keys.iter().zip(HELP_ROWS) {
-        let padding = " ".repeat(key_width.saturating_sub(key.width()));
         lines.push(Line::from(vec![
-            Span::styled(format!("{key}{padding}"), theme.version),
+            Span::styled(super::markdown::pad(key, key_width), theme.version),
             Span::raw(format!("  {label}")),
         ]));
     }

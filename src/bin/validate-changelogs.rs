@@ -15,18 +15,37 @@ use brew_changes::homebrew::{self, Info, Package, brew_info_runner};
 use futures::StreamExt;
 use serde::Deserialize;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Ok,
+    #[default]
+    Fail,
+    Skip,
+    Manual,
+    Partial,
+    /// Every release in range lacks notes, so the app shows nothing useful.
+    Empty,
+}
+
 #[derive(Default)]
 struct Outcome {
     name: String,
     repo: String,
     source: String,
     note: String,
-    found: bool,
-    skipped: bool,
-    manual: bool,
-    partial: bool,
-    /// Every release in range lacks notes, so the app shows nothing useful.
-    empty: bool,
+    status: Status,
+}
+
+impl Outcome {
+    fn skipped(name: String, source: &str, note: String) -> Self {
+        Self {
+            name,
+            repo: "/".into(),
+            source: source.into(),
+            note,
+            status: Status::Skip,
+        }
+    }
 }
 
 #[tokio::main]
@@ -75,14 +94,11 @@ async fn main() -> Result<()> {
                 // `brew outdated` only lists these with --greedy, so the app
                 // never shows them.
                 if package.current == "latest" {
-                    return Outcome {
-                        name: package.name,
-                        repo: "/".into(),
-                        source: "skip-latest".into(),
-                        note: "unversioned cask".into(),
-                        skipped: true,
-                        ..Default::default()
-                    };
+                    return Outcome::skipped(
+                        package.name,
+                        "skip-latest",
+                        "unversioned cask".into(),
+                    );
                 }
                 validate(&client, &package, &info).await
             }
@@ -95,32 +111,31 @@ async fn main() -> Result<()> {
     );
     results.sort_by(|left, right| left.name.cmp(&right.name));
 
-    let (mut ok, mut fail, mut skip, mut manual, mut partial, mut empty) = (0, 0, 0, 0, 0, 0);
     for result in &results {
-        let status = if result.skipped {
-            skip += 1;
-            "SKIP"
-        } else if result.empty {
-            empty += 1;
-            "EMPTY"
-        } else if result.manual {
-            manual += 1;
-            "MANUAL"
-        } else if result.partial {
-            partial += 1;
-            "PARTIAL"
-        } else if !result.found {
-            fail += 1;
-            "FAIL"
-        } else {
-            ok += 1;
-            "OK"
-        };
         println!(
-            "{status:<6} {:<20} {:<30} {:<18} {}",
-            result.name, result.repo, result.source, result.note
+            "{:<6} {:<20} {:<30} {:<18} {}",
+            format!("{:?}", result.status).to_uppercase(),
+            result.name,
+            result.repo,
+            result.source,
+            result.note
         );
     }
+    let count = |status| {
+        results
+            .iter()
+            .filter(|result| result.status == status)
+            .count()
+    };
+    let [ok, fail, skip, manual, partial, empty] = [
+        Status::Ok,
+        Status::Fail,
+        Status::Skip,
+        Status::Manual,
+        Status::Partial,
+        Status::Empty,
+    ]
+    .map(count);
     let matched = ok + manual;
     println!(
         "\n{matched}/{} matched ({ok}/{matched} auto-detected, {manual} via changelog_config.json), {partial} partial (best-effort), {empty} empty release notes, {fail} failed, {skip} skipped",
@@ -143,9 +158,8 @@ async fn named_packages(names: Vec<String>) -> (Vec<Package>, Vec<Outcome>) {
         .partition(|name| casks.as_ref().is_ok_and(|infos| infos.contains_key(name)));
     let package = |name: String, is_cask| Package {
         name,
-        installed: String::new(),
-        current: String::new(),
         is_cask,
+        ..Default::default()
     };
     let packages = formulae
         .into_iter()
@@ -154,13 +168,12 @@ async fn named_packages(names: Vec<String>) -> (Vec<Package>, Vec<Outcome>) {
         .collect();
     let skipped = unknown
         .into_iter()
-        .map(|name| Outcome {
-            name,
-            repo: "/".into(),
-            source: "skip-unknown".into(),
-            note: "not a formula or cask brew knows".into(),
-            skipped: true,
-            ..Default::default()
+        .map(|name| {
+            Outcome::skipped(
+                name,
+                "skip-unknown",
+                "not a formula or cask brew knows".into(),
+            )
         })
         .collect();
     (packages, skipped)
@@ -185,19 +198,25 @@ async fn top_packages(count: usize, is_cask: bool) -> Result<(Vec<Package>, Vec<
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
-    let analytics: Analytics = http
-        .get(&url)
-        .send()
-        .await?
-        .json()
-        .await
-        .context("fetching analytics")?;
-
-    let output = tokio::process::Command::new("brew")
-        .arg("tap")
-        .output()
-        .await
-        .context("brew tap")?;
+    let (analytics, output) = tokio::try_join!(
+        async {
+            let analytics: Analytics = http
+                .get(&url)
+                .send()
+                .await?
+                .json()
+                .await
+                .context("fetching analytics")?;
+            anyhow::Ok(analytics)
+        },
+        async {
+            tokio::process::Command::new("brew")
+                .arg("tap")
+                .output()
+                .await
+                .context("brew tap")
+        },
+    )?;
     if !output.status.success() {
         bail!("brew tap: {}", output.status);
     }
@@ -221,19 +240,15 @@ async fn top_packages(count: usize, is_cask: bool) -> Result<(Vec<Package>, Vec<
             _ => None,
         };
         match tap {
-            Some(tap) if !taps.contains(&tap) => skipped.push(Outcome {
+            Some(tap) if !taps.contains(&tap) => skipped.push(Outcome::skipped(
                 name,
-                source: "skip-tap".into(),
-                repo: "/".into(),
-                skipped: true,
-                note: format!("tap \"{tap}\" not installed"),
-                ..Default::default()
-            }),
+                "skip-tap",
+                format!("tap \"{tap}\" not installed"),
+            )),
             _ => packages.push(Package {
                 name,
-                installed: String::new(),
-                current: String::new(),
                 is_cask,
+                ..Default::default()
             }),
         }
     }
@@ -282,8 +297,9 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
             end,
         } => {
             outcome.source = "manual".into();
-            outcome.found = found;
-            outcome.manual = found;
+            if found {
+                outcome.status = Status::Manual;
+            }
             outcome.note = if found {
                 format!("{} bytes from {manual}, {}", section.len(), ending(end))
             } else {
@@ -295,7 +311,7 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
             section,
             end,
         } => {
-            outcome.found = true;
+            outcome.status = Status::Ok;
             outcome.source = format!("file:{filename}");
             outcome.note = format!("{} bytes, {}", section.len(), ending(end));
         }
@@ -310,7 +326,7 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
                 Ok(Releases { list, found }) => match (list.first(), list.last()) {
                     (None, _) => "no releases found".into(),
                     (Some(newest), Some(oldest)) if *found => {
-                        outcome.found = true;
+                        outcome.status = Status::Ok;
                         format!(
                             "{} releases, {}..{}",
                             list.len(),
@@ -319,7 +335,7 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
                         )
                     }
                     (Some(newest), _) => {
-                        outcome.partial = true;
+                        outcome.status = Status::Partial;
                         format!(
                             "tag for {} not found; showing {} most recent releases (latest={})",
                             package.current,
@@ -334,7 +350,7 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
             {
                 let without_notes = list.iter().filter(|release| release.lacks_notes()).count();
                 if without_notes == list.len() {
-                    outcome.empty = true;
+                    outcome.status = Status::Empty;
                     outcome.note = format!("no release has notes; {}", outcome.note);
                 } else if without_notes > 0 {
                     outcome.note = format!(
@@ -356,7 +372,9 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
             outcome.note = match result {
                 Err(error) => format!("fetch error: {error:#}"),
                 Ok(commits) => {
-                    outcome.found = !commits.is_empty();
+                    if !commits.is_empty() {
+                        outcome.status = Status::Ok;
+                    }
                     format!("{} commits", commits.len())
                 }
             };

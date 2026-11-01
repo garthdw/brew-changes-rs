@@ -1,8 +1,10 @@
 use anyhow::Result;
+use futures::future::join_all;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use super::Client;
+use super::forge::Range;
 use crate::version::matches_tag;
 
 const MAX_RELEASE_PAGES: usize = 3;
@@ -40,63 +42,51 @@ struct Tag {
     name: String,
 }
 
-/// Without the installed or target tag the releases belong to another
-/// version line, like opencode's v1 releases for its tag-only v2.
-pub(super) fn drop_unrelated(
-    found: Vec<Release>,
-    reached_installed: bool,
-    installed: &str,
-    target: &str,
-) -> Vec<Release> {
-    let unrelated = !installed.is_empty()
-        && !reached_installed
-        && !found
-            .iter()
-            .any(|release| matches_tag(&release.tag_name, target));
-    if unrelated { Vec::new() } else { found }
-}
-
 impl Client {
-    /// Falls back to plain tags only when there are no releases at all, for
-    /// repos that just tag commits (docker/cli, vim).
-    pub async fn fetch_releases(
+    pub(super) async fn fetch_releases(
         &self,
         owner: &str,
         repo: &str,
-        installed: &str,
-        target: &str,
-        prereleases_only: bool,
+        range: Range<'_>,
     ) -> Result<Vec<Release>> {
         let url = self.repo_url(owner, repo, "releases?per_page=100");
-        let walk = self
-            .fetch_pages::<Vec<Release>>(
-                url,
-                |release| release,
-                installed,
-                target,
-                prereleases_only,
-            )
+        let mut walk = self
+            .fetch_pages::<Vec<Release>>(url, |release| release, range)
             .await?;
-        if !walk.saw_any {
-            let url = self.repo_url(owner, repo, "tags?per_page=100");
-            let to_release = |tag: Tag| Release {
-                tag_name: tag.name,
-                ..Default::default()
-            };
-            return Ok(self
-                .fetch_pages::<Vec<Tag>>(url, to_release, installed, target, prereleases_only)
-                .await?
-                .releases);
+        if walk.saw_any {
+            walk.releases = self
+                .find_target_if_missing(owner, repo, walk.releases, range)
+                .await;
         }
-        let found = self
-            .find_target_if_missing(owner, repo, walk.releases, target, prereleases_only)
-            .await;
-        Ok(drop_unrelated(
-            found,
-            walk.reached_installed,
-            installed,
-            target,
-        ))
+        let to_release = |tag: Tag| Release {
+            tag_name: tag.name,
+            ..Default::default()
+        };
+        self.releases_or_tags::<Vec<Tag>>(
+            walk,
+            self.repo_url(owner, repo, "tags?per_page=100"),
+            to_release,
+            range,
+        )
+        .await
+    }
+
+    /// Falls back to plain tags only when there are no releases at all, for
+    /// repos that just tag commits (docker/cli, vim).
+    pub(super) async fn releases_or_tags<Tags: DeserializeOwned + IntoIterator>(
+        &self,
+        releases: Walk,
+        tags_url: String,
+        to_release: impl Fn(Tags::Item) -> Release,
+        range: Range<'_>,
+    ) -> Result<Vec<Release>> {
+        if releases.saw_any {
+            return Ok(releases.related(range));
+        }
+        Ok(self
+            .fetch_pages::<Tags>(tags_url, to_release, range)
+            .await?
+            .releases)
     }
 
     /// A just-published release can be missing from the list (its search index
@@ -108,9 +98,13 @@ impl Client {
         owner: &str,
         repo: &str,
         mut filtered: Vec<Release>,
-        target: &str,
-        prereleases_only: bool,
+        range: Range<'_>,
     ) -> Vec<Release> {
+        let Range {
+            target,
+            prereleases_only,
+            ..
+        } = range;
         if target.is_empty()
             || filtered
                 .iter()
@@ -132,26 +126,29 @@ impl Client {
             }
             [format!("v{target}"), target.to_string()]
         };
-        for tag in tags {
-            if let Ok(release) = self
-                .get_json::<Release>(&self.repo_url(owner, repo, &format!("releases/tags/{tag}")))
+        // Both at once, preferring the first.
+        join_all(tags.map(|tag| async move {
+            self.get_json::<Release>(&self.repo_url(owner, repo, &format!("releases/tags/{tag}")))
                 .await
-                && (release.prerelease || !prereleases_only)
-            {
-                return vec![release];
-            }
-        }
-        filtered
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .find(|release| release.prerelease || !prereleases_only)
+        .map_or(filtered, |release| vec![release])
     }
 
     pub(super) async fn fetch_pages<Page: DeserializeOwned + IntoIterator>(
         &self,
         url: String,
         to_release: impl Fn(Page::Item) -> Release,
-        installed: &str,
-        target: &str,
-        prereleases_only: bool,
+        range: Range<'_>,
     ) -> Result<Walk> {
+        let Range {
+            installed,
+            target,
+            prereleases_only,
+        } = range;
         let pages = if target.is_empty() {
             MAX_RELEASE_PAGES
         } else {
@@ -191,11 +188,26 @@ impl Client {
     }
 }
 
+#[derive(Default)]
 pub(super) struct Walk {
     pub(super) releases: Vec<Release>,
     /// Whether the endpoint returned any entries at all.
-    pub(super) saw_any: bool,
-    pub(super) reached_installed: bool,
+    saw_any: bool,
+    reached_installed: bool,
+}
+
+impl Walk {
+    /// Without the installed or target tag the releases belong to another
+    /// version line, like opencode's v1 releases for its tag-only v2.
+    fn related(self, range: Range<'_>) -> Vec<Release> {
+        let unrelated = !range.installed.is_empty()
+            && !self.reached_installed
+            && !self
+                .releases
+                .iter()
+                .any(|release| matches_tag(&release.tag_name, range.target));
+        if unrelated { Vec::new() } else { self.releases }
+    }
 }
 
 /// Returns whether to stop. With an installed version set, a target match
@@ -233,9 +245,10 @@ pub(super) fn next_page_url(link: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::test_support::{serve, setup};
     use serde_json::json;
     use wiremock::matchers::{path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, ResponseTemplate};
 
     fn tag(name: &str) -> Release {
         Release {
@@ -244,24 +257,19 @@ mod tests {
         }
     }
 
+    fn range<'a>(installed: &'a str, target: &'a str, prereleases_only: bool) -> Range<'a> {
+        Range {
+            installed,
+            target,
+            prereleases_only,
+        }
+    }
+
     fn tags(releases: &[Release]) -> Vec<&str> {
         releases
             .iter()
             .map(|release| release.tag_name.as_str())
             .collect()
-    }
-
-    async fn serve(server: &MockServer, route: &str, body: impl serde::Serialize) {
-        Mock::given(path(route))
-            .respond_with(ResponseTemplate::new(200).set_body_json(body))
-            .mount(server)
-            .await;
-    }
-
-    async fn setup() -> (MockServer, Client) {
-        let server = MockServer::start().await;
-        let client = Client::for_test(&server.uri());
-        (server, client)
     }
 
     #[tokio::test]
@@ -287,7 +295,7 @@ mod tests {
             .mount(&server)
             .await;
         let got = client
-            .fetch_releases("o", "r", "1.0.0", "", false)
+            .fetch_releases("o", "r", range("1.0.0", "", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v3.0.0", "v2.0.0"]);
@@ -302,7 +310,7 @@ mod tests {
             .collect();
         serve(&server, "/repos/o/r/releases", page).await;
         let got = client
-            .fetch_releases("o", "r", "", "25.0.0", false)
+            .fetch_releases("o", "r", range("", "25.0.0", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v25.0.0"]);
@@ -324,7 +332,7 @@ mod tests {
         )
         .await;
         let got = client
-            .fetch_releases("o", "r", "1.0.0", "2.0.0", false)
+            .fetch_releases("o", "r", range("1.0.0", "2.0.0", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v2.0.0", "v1.5.0"]);
@@ -340,7 +348,7 @@ mod tests {
         )
         .await;
         let got = client
-            .fetch_releases("o", "r", "0.34.0", "0.34.2", false)
+            .fetch_releases("o", "r", range("0.34.0", "0.34.2", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v0.34.2", "v0.34.1"]);
@@ -366,7 +374,7 @@ mod tests {
             .mount(&server)
             .await;
         let got = client
-            .fetch_releases("o", "r", "", "999.0.0", false)
+            .fetch_releases("o", "r", range("", "999.0.0", false))
             .await
             .unwrap();
         // list + latest + two by-tag lookups
@@ -386,7 +394,7 @@ mod tests {
         )
         .await;
         let got = client
-            .fetch_releases("o", "r", "2.0.30", "2.0.31", false)
+            .fetch_releases("o", "r", range("2.0.30", "2.0.31", false))
             .await
             .unwrap();
         assert!(got.is_empty(), "{got:?}");
@@ -403,7 +411,7 @@ mod tests {
         )
         .await;
         let got = client
-            .fetch_releases("o", "r", "2.0.30", "2.0.31", false)
+            .fetch_releases("o", "r", range("2.0.30", "2.0.31", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v2.0.32"]);
@@ -420,7 +428,7 @@ mod tests {
         )
         .await;
         let got = client
-            .fetch_releases("o", "r", "4.6.5", "4.6.7", false)
+            .fetch_releases("o", "r", range("4.6.5", "4.6.7", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v4.6.7", "v4.6.6"]);
@@ -437,7 +445,7 @@ mod tests {
         )
         .await;
         let got = client
-            .fetch_releases("o", "r", "4.6.6", "4.6.7", false)
+            .fetch_releases("o", "r", range("4.6.6", "4.6.7", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v4.6.7"]);
@@ -454,7 +462,7 @@ mod tests {
         serve(&server, "/repos/o/r/releases/tags/v0.6.0", tag("v0.6.0")).await;
         serve(&server, "/repos/o/r/releases", page).await;
         let got = client
-            .fetch_releases("o", "r", "0.5.0", "0.6.0", false)
+            .fetch_releases("o", "r", range("0.5.0", "0.6.0", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v0.6.0"]);
@@ -480,7 +488,7 @@ mod tests {
         .await;
         serve(&server, "/repos/o/r/releases", page).await;
         let got = client
-            .fetch_releases("o", "r", "1.24.0", "1.25.0", true)
+            .fetch_releases("o", "r", range("1.24.0", "1.25.0", true))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v1.25.0-pre"]);
@@ -496,7 +504,7 @@ mod tests {
         )
         .await;
         let got = client
-            .fetch_releases("o", "r", "1.8.1", "", false)
+            .fetch_releases("o", "r", range("1.8.1", "", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["jq-1.8.2"]);
@@ -513,7 +521,7 @@ mod tests {
         )
         .await;
         let got = client
-            .fetch_releases("o", "r", "1.0.0", "", false)
+            .fetch_releases("o", "r", range("1.0.0", "", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v2.0.0"]);
@@ -529,7 +537,7 @@ mod tests {
             .mount(&server)
             .await;
         let got = client
-            .fetch_releases("o", "r", "1.0.0", "", false)
+            .fetch_releases("o", "r", range("1.0.0", "", false))
             .await
             .unwrap();
         assert!(got.is_empty());
@@ -544,7 +552,7 @@ mod tests {
             .await;
         assert!(
             client
-                .fetch_releases("o", "r", "1.0.0", "", false)
+                .fetch_releases("o", "r", range("1.0.0", "", false))
                 .await
                 .is_err()
         );

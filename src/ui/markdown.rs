@@ -396,14 +396,7 @@ impl Renderer {
     }
 
     fn prefix_width(&self) -> usize {
-        self.containers
-            .iter()
-            .map(|container| match container {
-                Container::Quote => 2,
-                Container::List(_) => 0,
-                Container::Item(width) => *width,
-            })
-            .sum()
+        self.prefix(false).iter().map(Span::width).sum()
     }
 
     /// `first` puts a pending list marker on the line.
@@ -547,20 +540,10 @@ fn split_words(text: &str) -> Vec<(bool, &str)> {
 }
 
 fn split_by_width(text: &str, width: usize) -> Vec<String> {
-    let mut chunks = vec![];
-    let mut chunk = String::new();
-    let mut chunk_width = 0;
-    for character in text.chars() {
-        let character_width = character.width().unwrap_or(0);
-        if chunk_width + character_width > width && chunk_width > 0 {
-            chunks.push(std::mem::take(&mut chunk));
-            chunk_width = 0;
-        }
-        chunk.push(character);
-        chunk_width += character_width;
-    }
-    chunks.push(chunk);
-    chunks
+    split_spans_by_width(vec![Span::raw(text.to_string())], width)
+        .into_iter()
+        .map(|line| line.into_iter().map(|span| span.content).collect())
+        .collect()
 }
 
 // Loaded on first use so the list still appears instantly at startup.
@@ -724,7 +707,7 @@ fn truncate(text: &str, width: usize) -> String {
     truncated
 }
 
-fn pad(text: &str, width: usize) -> String {
+pub(super) fn pad(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width.saturating_sub(text.width())))
 }
 

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::template::Heading;
 use crate::version;
 
-pub const MAX_CONTENT_LINES: usize = 100;
+const MAX_CONTENT_LINES: usize = 100;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Section {
