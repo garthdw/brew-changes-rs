@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use url::Url;
-
 use super::codeberg::Codeberg;
-use super::forge::Forge;
+use super::forge::{Forge, ForgeUrl};
 use super::github_com::GitHub;
 use super::gitlab::GitLab;
 use super::tangled::Tangled;
@@ -88,125 +86,21 @@ pub fn resolve_source(name: &str, version: &str, urls: &[&str]) -> Source {
     }
 }
 
-struct GitHubUrl<'a> {
-    owner: &'a str,
-    repo: &'a str,
-    rest: &'a str,
-    raw: bool,
-}
-
-/// Accepts github.com (https or ssh) and raw.githubusercontent.com URLs. The
-/// host must be exactly github.com (optionally www.), not a subdomain like
-/// docs.github.com. Repo names can contain dots ("llama.cpp"), so only a
-/// final ".git" is stripped.
-fn parse_github_url(url: &str) -> Option<GitHubUrl<'_>> {
-    const HOSTS: [(&str, bool); 2] = [("github.com", false), ("raw.githubusercontent.com", true)];
-    let (host_end, raw) = url
-        .char_indices()
-        .filter(|(index, _)| {
-            let before = &url[..*index];
-            before.is_empty()
-                || before.ends_with("//")
-                || before.ends_with('@')
-                || before.ends_with("//www.")
-        })
-        .find_map(|(index, _)| {
-            HOSTS.iter().find_map(|(host, raw)| {
-                let after = url[index..].strip_prefix(host)?;
-                let separator_ok = after.starts_with('/') || (!raw && after.starts_with(':'));
-                separator_ok.then_some((index + host.len() + 1, *raw))
-            })
-        })?;
-    let (owner, after_owner) = url[host_end..].split_once('/')?;
-    let repo_end = after_owner
-        .find(['/', '?', '#'])
-        .unwrap_or(after_owner.len());
-    let (segment, rest) = after_owner.split_at(repo_end);
-    let repo = segment
-        .strip_suffix(".git")
-        .filter(|repo| !repo.is_empty())
-        .unwrap_or(segment);
-    (!owner.is_empty() && !repo.is_empty()).then_some(GitHubUrl {
-        owner,
-        repo,
-        rest,
-        raw,
-    })
-}
-
 fn resolve_repo(urls: &[&str]) -> Option<Arc<dyn Forge>> {
-    urls.iter().find_map(|url| match parse_github_url(url) {
-        Some(parsed) => Some(Arc::new(GitHub::new(parsed.owner, parsed.repo)) as Arc<dyn Forge>),
-        None => parse_other_forge_url(url),
-    })
+    urls.iter().find_map(|url| detect_forge(url))
 }
 
-/// GitLab is any `gitlab.*` host. Its project paths can nest groups, so the
-/// path runs up to GitLab's `/-/` separator or a pre-separator route
-/// (`/uploads/`, `/repository/`); Tangled's and Codeberg's are always `owner/repo`.
-fn parse_other_forge_url(url: &str) -> Option<Arc<dyn Forge>> {
-    const GITLAB_ROUTES: [&str; 2] = ["uploads", "repository"];
-    let parsed = Url::parse(url).ok()?;
-    let host = parsed.host_str()?;
-    let base = parsed.origin().ascii_serialization();
-    let path = parsed.path().trim_matches('/');
-    let mut segments: Vec<&str> = path
-        .split("/-/")
-        .next()?
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    let new_forge: fn(String, String, &str) -> Arc<dyn Forge> = if host.starts_with("gitlab.") {
-        // Instance routes, not projects: the API and `/-/project/<id>/uploads`.
-        if matches!(segments.first(), Some(&"api" | &"-")) {
-            return None;
-        }
-        if let Some(route) = segments
-            .iter()
-            .position(|segment| GITLAB_ROUTES.contains(segment))
-        {
-            segments.truncate(route);
-        }
-        |base, owner, repo| Arc::new(GitLab::new(base, owner, repo))
-    } else if host == "tangled.org" || host == "tangled.sh" {
-        segments.truncate(2);
-        |base, owner, repo| Arc::new(Tangled::new(base, owner, repo))
-    } else if host == "codeberg.org" {
-        segments.truncate(2);
-        |base, owner, repo| Arc::new(Codeberg::new(base, owner, repo))
-    } else {
-        return None;
-    };
-    let (repo, owner) = segments.split_last()?;
-    let repo = repo.strip_suffix(".git").unwrap_or(repo);
-    (!owner.is_empty() && !repo.is_empty()).then(|| new_forge(base, owner.join("/"), repo))
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct GitHubFile<'a> {
-    pub owner: &'a str,
-    pub repo: &'a str,
-    pub git_ref: &'a str,
-    pub path: &'a str,
-}
-
-/// Lets a curated file URL be fetched through the authenticated API.
-pub(super) fn parse_github_file_url(url: &str) -> Option<GitHubFile<'_>> {
-    let parsed = parse_github_url(url)?;
-    let mut rest = parsed.rest.trim_start_matches('/');
-    if !parsed.raw {
-        let (kind, after) = rest.split_once('/')?;
-        if kind != "blob" && kind != "raw" {
-            return None;
-        }
-        rest = after;
+/// GitHub matches the URL as text, since its ssh URLs aren't a `Url`.
+fn detect_forge(url: &str) -> Option<Arc<dyn Forge>> {
+    fn shared(forge: impl Forge + 'static) -> Arc<dyn Forge> {
+        Arc::new(forge)
     }
-    let (git_ref, path) = rest.split_once('/')?;
-    (!git_ref.is_empty() && !path.is_empty()).then_some(GitHubFile {
-        owner: parsed.owner,
-        repo: parsed.repo,
-        git_ref,
-        path,
+    GitHub::detect(url).map(shared).or_else(|| {
+        let url = ForgeUrl::parse(url)?;
+        GitLab::detect(&url)
+            .map(shared)
+            .or_else(|| Tangled::detect(&url).map(shared))
+            .or_else(|| Codeberg::detect(&url).map(shared))
     })
 }
 
@@ -460,36 +354,5 @@ mod tests {
             source.manual_url,
             "https://github.com/ansible-community/ansible-build-data/blob/main/12/CHANGELOG-v12.rst"
         );
-    }
-
-    #[test]
-    fn parse_github_file_url_cases() {
-        let file = |owner, repo, git_ref, path| {
-            Some(GitHubFile {
-                owner,
-                repo,
-                git_ref,
-                path,
-            })
-        };
-        let cases = [
-            (
-                "https://github.com/dart-lang/sdk/blob/main/CHANGELOG.md",
-                file("dart-lang", "sdk", "main", "CHANGELOG.md"),
-            ),
-            (
-                "https://github.com/owner/repo/raw/main/nested/dir/NEWS",
-                file("owner", "repo", "main", "nested/dir/NEWS"),
-            ),
-            (
-                "https://raw.githubusercontent.com/owner/repo/main/CHANGELOG.md",
-                file("owner", "repo", "main", "CHANGELOG.md"),
-            ),
-            ("https://curl.se/changes.html", None),
-            ("https://github.com/owner/repo/releases", None),
-        ];
-        for (url, want) in cases {
-            assert_eq!(parse_github_file_url(url), want, "{url}");
-        }
     }
 }

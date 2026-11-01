@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use futures::FutureExt;
 use futures::future::{BoxFuture, ready};
 use serde::Deserialize;
+use url::Url;
 
 use super::{Client, Commit, Release};
 
@@ -126,11 +127,46 @@ impl Repo {
         }
     }
 
+    /// The last segment is the repo, the ones before it its owner.
+    pub(super) fn from_segments(base: &str, segments: &[String]) -> Option<Self> {
+        let (repo, owner) = segments.split_last()?;
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        (!owner.is_empty() && !repo.is_empty()).then(|| Self::new(base, owner.join("/"), repo))
+    }
+
     pub(super) fn path(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
 
     pub(super) fn url(&self) -> String {
         format!("{}/{}", self.base, self.path())
+    }
+}
+
+/// A URL on a forge that can be self-hosted, split for each forge's `detect`.
+pub(super) struct ForgeUrl {
+    pub(super) host: String,
+    pub(super) base: String,
+    /// The path up to GitLab's `/-/` separator.
+    pub(super) segments: Vec<String>,
+}
+
+impl ForgeUrl {
+    pub(super) fn parse(url: &str) -> Option<Self> {
+        let parsed = Url::parse(url).ok()?;
+        let segments = parsed
+            .path()
+            .trim_matches('/')
+            .split("/-/")
+            .next()?
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(String::from)
+            .collect();
+        Some(Self {
+            host: parsed.host_str()?.into(),
+            base: parsed.origin().ascii_serialization(),
+            segments,
+        })
     }
 }

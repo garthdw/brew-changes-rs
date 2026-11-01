@@ -3,7 +3,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 
-use super::forge::{Entry, Forge, Range, Repo, names_of_kind};
+use super::forge::{Entry, Forge, ForgeUrl, Range, Repo, names_of_kind};
 use super::releases::null_as_default;
 use super::{Client, Release};
 
@@ -14,6 +14,25 @@ pub struct GitLab(Repo);
 impl GitLab {
     pub fn new(base: impl Into<String>, owner: impl Into<String>, repo: impl Into<String>) -> Self {
         Self(Repo::new(base, owner, repo))
+    }
+
+    /// Any `gitlab.*` host. Project paths can nest groups, so the path runs
+    /// up to GitLab's `/-/` separator or a pre-separator route.
+    pub(super) fn detect(url: &ForgeUrl) -> Option<Self> {
+        const ROUTES: [&str; 2] = ["uploads", "repository"];
+        if !url.host.starts_with("gitlab.") {
+            return None;
+        }
+        let segments = &url.segments;
+        // Instance routes, not projects: the API and `/-/project/<id>/uploads`.
+        if matches!(segments.first().map(String::as_str), Some("api" | "-")) {
+            return None;
+        }
+        let end = segments
+            .iter()
+            .position(|segment| ROUTES.contains(&segment.as_str()))
+            .unwrap_or(segments.len());
+        Repo::from_segments(&url.base, &segments[..end]).map(Self)
     }
 
     fn project(&self) -> String {

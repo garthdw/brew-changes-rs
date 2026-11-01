@@ -90,6 +90,10 @@ impl GitHub {
         }
     }
 
+    pub(super) fn detect(url: &str) -> Option<Self> {
+        parse_github_url(url).map(|parsed| Self::new(parsed.owner, parsed.repo))
+    }
+
     fn api_url(&self, client: &Client, path: &str) -> String {
         format!(
             "{}/repos/{}/{}/{path}",
@@ -359,6 +363,80 @@ impl Forge for GitHub {
     }
 }
 
+struct GitHubUrl<'a> {
+    owner: &'a str,
+    repo: &'a str,
+    rest: &'a str,
+    raw: bool,
+}
+
+/// Accepts github.com (https or ssh) and raw.githubusercontent.com URLs. The
+/// host must be exactly github.com (optionally www.), not a subdomain like
+/// docs.github.com. Repo names can contain dots ("llama.cpp"), so only a
+/// final ".git" is stripped.
+fn parse_github_url(url: &str) -> Option<GitHubUrl<'_>> {
+    const HOSTS: [(&str, bool); 2] = [("github.com", false), ("raw.githubusercontent.com", true)];
+    let (host_end, raw) = url
+        .char_indices()
+        .filter(|(index, _)| {
+            let before = &url[..*index];
+            before.is_empty()
+                || before.ends_with("//")
+                || before.ends_with('@')
+                || before.ends_with("//www.")
+        })
+        .find_map(|(index, _)| {
+            HOSTS.iter().find_map(|(host, raw)| {
+                let after = url[index..].strip_prefix(host)?;
+                let separator_ok = after.starts_with('/') || (!raw && after.starts_with(':'));
+                separator_ok.then_some((index + host.len() + 1, *raw))
+            })
+        })?;
+    let (owner, after_owner) = url[host_end..].split_once('/')?;
+    let repo_end = after_owner
+        .find(['/', '?', '#'])
+        .unwrap_or(after_owner.len());
+    let (segment, rest) = after_owner.split_at(repo_end);
+    let repo = segment
+        .strip_suffix(".git")
+        .filter(|repo| !repo.is_empty())
+        .unwrap_or(segment);
+    (!owner.is_empty() && !repo.is_empty()).then_some(GitHubUrl {
+        owner,
+        repo,
+        rest,
+        raw,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct GitHubFile<'a> {
+    pub owner: &'a str,
+    pub repo: &'a str,
+    pub git_ref: &'a str,
+    pub path: &'a str,
+}
+
+/// Lets a curated file URL be fetched through the authenticated API.
+pub(super) fn parse_github_file_url(url: &str) -> Option<GitHubFile<'_>> {
+    let parsed = parse_github_url(url)?;
+    let mut rest = parsed.rest.trim_start_matches('/');
+    if !parsed.raw {
+        let (kind, after) = rest.split_once('/')?;
+        if kind != "blob" && kind != "raw" {
+            return None;
+        }
+        rest = after;
+    }
+    let (git_ref, path) = rest.split_once('/')?;
+    (!git_ref.is_empty() && !path.is_empty()).then_some(GitHubFile {
+        owner: parsed.owner,
+        repo: parsed.repo,
+        git_ref,
+        path,
+    })
+}
+
 /// A commit as GitHub's commits API lists it.
 #[derive(Deserialize)]
 struct CommitEntry {
@@ -416,5 +494,36 @@ mod tests {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339(1_793_383_622), "2026-10-30T18:07:02Z");
+    }
+
+    #[test]
+    fn parse_github_file_url_cases() {
+        let file = |owner, repo, git_ref, path| {
+            Some(GitHubFile {
+                owner,
+                repo,
+                git_ref,
+                path,
+            })
+        };
+        let cases = [
+            (
+                "https://github.com/dart-lang/sdk/blob/main/CHANGELOG.md",
+                file("dart-lang", "sdk", "main", "CHANGELOG.md"),
+            ),
+            (
+                "https://github.com/owner/repo/raw/main/nested/dir/NEWS",
+                file("owner", "repo", "main", "nested/dir/NEWS"),
+            ),
+            (
+                "https://raw.githubusercontent.com/owner/repo/main/CHANGELOG.md",
+                file("owner", "repo", "main", "CHANGELOG.md"),
+            ),
+            ("https://curl.se/changes.html", None),
+            ("https://github.com/owner/repo/releases", None),
+        ];
+        for (url, want) in cases {
+            assert_eq!(parse_github_file_url(url), want, "{url}");
+        }
     }
 }

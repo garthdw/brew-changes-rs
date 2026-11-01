@@ -1,8 +1,7 @@
 use anyhow::Result;
 
 use super::forge::{Forge, Range};
-use super::github_com::GitHub;
-use super::source::parse_github_file_url;
+use super::github_com::{GitHub, parse_github_file_url};
 use super::{Client, Release, Source};
 use crate::changelog::{Order, Section, trim_to_range};
 use crate::template;
