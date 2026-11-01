@@ -37,7 +37,6 @@
   "ghostscript": { "url": "https://ghostscript.readthedocs.io/en/latest/News.html" },
   "ghostty": { "url": "https://ghostty.org/docs/install/release-notes/{major-minor-patch}" },
   "git": { "url": "https://raw.githubusercontent.com/git/git/master/Documentation/RelNotes/{version}.adoc" },
-  "glab": { "url": "https://gitlab.com/gitlab-org/cli/-/blob/main/CHANGELOG.md" },
   "glib": { "url": "https://gitlab.gnome.org/GNOME/glib/-/raw/main/NEWS" },
   "gnu-tar": { "url": "https://cgit.git.savannah.gnu.org/cgit/tar.git/plain/NEWS", "heading": "version {version} - {*}" },
   "gnupg": { "url": "https://www.gnupg.org/download/index.html" },
