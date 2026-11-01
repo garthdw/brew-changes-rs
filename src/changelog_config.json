@@ -5,6 +5,7 @@
   "alfred": { "url": "https://www.alfredapp.com/changelog/", "heading": "Alfred {version}" },
   "android-platform-tools": { "url": "https://developer.android.com/tools/releases/platform-tools" },
   "ansible": { "url": "https://github.com/ansible-community/ansible-build-data/blob/main/{major}/CHANGELOG-v{major}.rst" },
+  "aom": { "url": "https://aomedia.googlesource.com/aom/+/refs/heads/main/CHANGELOG?format=TEXT", "heading": "{*} v{version}" },
   "autoconf": { "url": "https://cgit.git.savannah.gnu.org/cgit/autoconf.git/plain/NEWS", "heading": "* Noteworthy changes in release {version} ({*}" },
   "automake": { "url": "https://cgit.git.savannah.gnu.org/cgit/automake.git/plain/NEWS", "heading": "New in {version} ({*}" },
   "awscli": { "url": "https://github.com/aws/aws-cli/blob/v2/CHANGELOG.rst" },

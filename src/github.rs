@@ -206,7 +206,22 @@ impl Client {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|content_type| content_type.contains("html"));
+        // Gitiles (googlesource.com) has no raw endpoint: `?format=TEXT`
+        // serves the file base64-encoded, while its HTML view puts each line
+        // in a table row.
+        let is_gitiles_text = !is_html && response.headers().contains_key("x-gitiles-object-type");
         let body = response.text().await.map_err(retryable)?;
+        if is_gitiles_text {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(body.trim())
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| Ok(String::from_utf8(bytes)?))
+                .map_err(|error| RawFetchError {
+                    error: error.context(format!("GET {url}: decoding gitiles text")),
+                    retryable: false,
+                })?;
+            return Ok((decoded, false));
+        }
         if !is_html {
             return Ok((body, false));
         }
@@ -295,6 +310,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, ("## 1.2.3".into(), true));
+    }
+
+    #[tokio::test]
+    async fn fetch_raw_gitiles_text_is_decoded() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("djEuMgogIGZpeAo=", "text/plain; charset=utf-8")
+                    .insert_header("x-gitiles-object-type", "blob"),
+            )
+            .mount(&server)
+            .await;
+        let got = Client::for_test(&server.uri())
+            .fetch_raw(&server.uri())
+            .await
+            .unwrap();
+        assert_eq!(got, ("v1.2\n  fix\n".into(), false));
     }
 
     #[tokio::test]
