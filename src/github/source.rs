@@ -62,10 +62,13 @@ impl Source {
 
 /// The single place a changelog source is chosen, shared by the app and the
 /// validator so the validator exercises the shipped path.
-/// `urls` are tried in order for a repo; the config's `repo` is on GitHub.
+/// `urls` are tried in order for a repo. The config's `repo` is a repo URL,
+/// or "owner/repo" on GitHub.
 pub fn resolve_source(name: &str, version: &str, urls: &[&str]) -> Source {
     let entry = config::get(name);
-    let forge = if !entry.repo.is_empty() {
+    let forge = if entry.repo.contains("://") {
+        resolve_repo(&[&entry.repo])
+    } else if !entry.repo.is_empty() {
         let (owner, repo) = entry.repo.split_once('/').unwrap_or((&entry.repo, ""));
         Some(Arc::new(GitHub::new(owner, repo)) as Arc<dyn Forge>)
     } else if entry.url.is_empty() {
@@ -420,6 +423,11 @@ mod tests {
                 },
             ),
             (
+                "glib",
+                "https://developer.gnome.org/glib/",
+                Source::with_forge(GitLab::new("https://gitlab.gnome.org", "GNOME", "glib")),
+            ),
+            (
                 "raycast",
                 "https://raycast.com/",
                 Source {
@@ -433,6 +441,15 @@ mod tests {
         for (package, homepage, want) in cases {
             assert_eq!(resolve_source(package, "", &[homepage]), want, "{package}");
         }
+    }
+
+    #[test]
+    fn versioned_formula_uses_its_base_entry() {
+        let source = resolve_source("python@3.12", "3.12.7", &[]);
+        assert_eq!(
+            source.manual_url,
+            "https://docs.python.org/3.12/whatsnew/changelog.html"
+        );
     }
 
     #[test]
