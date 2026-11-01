@@ -52,6 +52,7 @@
   "imagemagick": { "url": "https://imagemagick.org/changelog/" },
   "imagemagick-full": { "url": "https://imagemagick.org/changelog/" },
   "inkscape": { "url": "https://inkscape.org/release/inkscape-{version}/" },
+  "ipmitool": { "url": "https://codeberg.org/IPMITool/ipmitool/raw/branch/HEAD/ChangeLog", "heading": "version {version} {*}" },
   "iterm2": { "url": "https://iterm2.com/appcasts/full_changes.txt", "heading": "Version {version} was built on {*}" },
   "jordanbaird-ice": { "repo": "jordanbaird/Ice" },
   "jupyterlab": { "repo": "jupyterlab/jupyterlab" },
