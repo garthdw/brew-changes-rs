@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use brew_changes::github::{Changelog, Client, Releases, resolve_source};
+use brew_changes::forges::{Changelog, Client, Releases, resolve_source};
 use brew_changes::homebrew::{self, Info, Package, brew_info_runner};
 use futures::StreamExt;
 use serde::Deserialize;
@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
     };
 
     let infos = homebrew::resolve_info(brew_info_runner(), &packages).await;
+    brew_changes::timing::init()?;
     let client = Client::new()?;
     let checks = packages
         .into_iter()

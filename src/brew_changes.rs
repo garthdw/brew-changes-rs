@@ -1,8 +1,9 @@
 pub mod changelog;
 pub mod config;
-pub mod github;
+pub mod forges;
 pub mod homebrew;
 pub mod template;
+pub mod timing;
 pub mod ui;
 pub mod version;
 

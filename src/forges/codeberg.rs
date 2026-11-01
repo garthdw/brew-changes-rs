@@ -3,7 +3,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 
-use super::forge::{Forge, Range, Repo};
+use super::forge::{Forge, ForgeUrl, Range, Repo};
 use super::releases::{Walk, null_as_default};
 use super::{Client, Release, StatusError};
 
@@ -12,8 +12,16 @@ use super::{Client, Release, StatusError};
 pub struct Codeberg(Repo);
 
 impl Codeberg {
+    #[cfg(test)]
     pub fn new(base: impl Into<String>, owner: impl Into<String>, repo: impl Into<String>) -> Self {
         Self(Repo::new(base, owner, repo))
+    }
+
+    pub(super) fn detect(url: &ForgeUrl) -> Option<Self> {
+        if url.host != "codeberg.org" {
+            return None;
+        }
+        Repo::from_segments(&url.base, url.segments.get(..2)?).map(Self)
     }
 
     fn api(&self) -> String {

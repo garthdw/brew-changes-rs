@@ -33,12 +33,14 @@
 ## Commands
 
 ```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --features timing -- -D warnings && cargo test
 cargo run                                          # the TUI
 cargo run --bin validate-changelogs -- 100 [-cask] # resolution/fetch over real top packages
 cargo run --bin validate-changelogs -- -outdated
 cargo run --bin validate-changelogs -- --filter htop --filter zed  # only these (narrows -outdated too)
 scripts/run-with-fake-brew.sh [args]               # the TUI with a fake brew and local fake GitHub
+cargo build --release --features timing           # then BREW_CHANGES_TIMING=<file> logs slow steps
+cargo flamegraph --profile profiling                 # release with symbols
 goreleaser release --snapshot --skip=publish --clean   # stages prebuilt/brew-changes-<target>/brew-changes (release.yml builds them)
 ```
 
@@ -47,8 +49,8 @@ The shell is zsh, which doesn't word-split unquoted variables: with `args="--fil
 ## Architecture
 
 - `homebrew`: `brew outdated`/`brew info` JSON (info batched 50 per call, 8 at once, failing batches bisected), `brew upgrade`.
-- `github::resolve_source` is the single place a changelog source is chosen: the `src/changelog_config.json` override, else auto-detecting a GitHub, GitLab (any `gitlab.*` host), Tangled or Codeberg repo into `Source::forge`, an `Arc<dyn Forge>` (`github/forge.rs` holds the trait and GitHub; `gitlab.rs`, `tangled.rs`, `codeberg.rs`). A new forge is one impl plus its URL detection. The app and `validate-changelogs` both use it.
-- `github::Client::fetch`: manual URL, else the repo's changelog file (one root listing), else releases (tags fallback), all through the `Forge` trait (`resolve` first: Tangled needs its repo DID), returning a `Changelog` enum with one variant per outcome. `Client` holds the API/raw base URLs so tests point it at `wiremock`.
+- `forges::resolve_source` is the single place a changelog source is chosen: the `src/changelog_config.json` override, else auto-detecting a GitHub, GitLab (any `gitlab.*` host), Tangled or Codeberg repo into `Source::forge`, an `Arc<dyn Forge>` (`forges/forge.rs` holds the trait and URL splitting; `github.rs` (with the API bases and token), `gitlab.rs`, `tangled.rs`, `codeberg.rs`). A new forge is one impl plus its `detect`, chained in `source.rs`. The app and `validate-changelogs` both use it.
+- `forges::Client::fetch`: manual URL, else the repo's changelog file (one root listing), else releases (tags fallback), all through the `Forge` trait (`resolve` first: Tangled needs its repo DID), returning a `Changelog` enum with one variant per outcome. `Client` holds the GitHub API/raw base URLs (`GitHubApi`) so tests point it at `wiremock`.
 - `changelog::trim_to_range`, `template` and `version`: heading detection, the per-entry `url`/`version`/`heading` templates, and version/tag matching.
 - `ui::app`: state plus a pure `update(Message) -> Vec<Effect>`; UI behaviour is tested there without a terminal. It caches each expanded body already framed. `ui::run` executes effects on tokio and feeds results back as `Message`s. `ui::view::lines_in` builds only the visible window from the cached frames; `ui::markdown` renders Markdown with pulldown-cmark.
 - `tests/e2e.rs` runs the real binary in a detached tmux session (tmux required) with a `brew` shim on `PATH` and `BREW_CHANGES_GITHUB_API` pointing `Client::new` at a `wiremock` server.

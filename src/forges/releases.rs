@@ -1,5 +1,4 @@
 use anyhow::Result;
-use futures::future::join_all;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -37,40 +36,7 @@ pub(super) fn null_as_default<'de, D: serde::Deserializer<'de>>(
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-#[derive(Deserialize)]
-struct Tag {
-    name: String,
-}
-
 impl Client {
-    pub(super) async fn fetch_releases(
-        &self,
-        owner: &str,
-        repo: &str,
-        range: Range<'_>,
-    ) -> Result<Vec<Release>> {
-        let url = self.repo_url(owner, repo, "releases?per_page=100");
-        let mut walk = self
-            .fetch_pages::<Vec<Release>>(url, |release| release, range)
-            .await?;
-        if walk.saw_any {
-            walk.releases = self
-                .find_target_if_missing(owner, repo, walk.releases, range)
-                .await;
-        }
-        let to_release = |tag: Tag| Release {
-            tag_name: tag.name,
-            ..Default::default()
-        };
-        self.releases_or_tags::<Vec<Tag>>(
-            walk,
-            self.repo_url(owner, repo, "tags?per_page=100"),
-            to_release,
-            range,
-        )
-        .await
-    }
-
     /// Falls back to plain tags only when there are no releases at all, for
     /// repos that just tag commits (docker/cli, vim).
     pub(super) async fn releases_or_tags<Tags: DeserializeOwned + IntoIterator>(
@@ -87,53 +53,6 @@ impl Client {
             .fetch_pages::<Tags>(tags_url, to_release, range)
             .await?
             .releases)
-    }
-
-    /// A just-published release can be missing from the list (its search index
-    /// lags) though `/releases/latest` has it. Otherwise the target is usually
-    /// older than the whole first page (llama.cpp's per-commit builds), so it's
-    /// fetched by tag and returned alone.
-    async fn find_target_if_missing(
-        &self,
-        owner: &str,
-        repo: &str,
-        mut filtered: Vec<Release>,
-        range: Range<'_>,
-    ) -> Vec<Release> {
-        let Range {
-            target,
-            prereleases_only,
-            ..
-        } = range;
-        if target.is_empty()
-            || filtered
-                .iter()
-                .any(|release| matches_tag(&release.tag_name, target))
-        {
-            return filtered;
-        }
-        // `/releases/latest` is never a pre-release.
-        if !prereleases_only
-            && let Ok(latest) = self
-                .get_json::<Release>(&self.repo_url(owner, repo, "releases/latest"))
-                .await
-            && matches_tag(&latest.tag_name, target)
-        {
-            // The list is newest first and holds only releases older than the target.
-            filtered.insert(0, latest);
-            return filtered;
-        }
-        let tags = [format!("v{target}"), target.to_string()];
-        // Both at once, preferring the first.
-        join_all(tags.map(|tag| async move {
-            self.get_json::<Release>(&self.repo_url(owner, repo, &format!("releases/tags/{tag}")))
-                .await
-        }))
-        .await
-        .into_iter()
-        .flatten()
-        .find(|release| release.prerelease || !prereleases_only)
-        .map_or(filtered, |release| vec![release])
     }
 
     pub(super) async fn fetch_pages<Page: DeserializeOwned + IntoIterator>(
@@ -190,7 +109,7 @@ impl Client {
 pub(super) struct Walk {
     pub(super) releases: Vec<Release>,
     /// Whether the endpoint returned any entries at all.
-    saw_any: bool,
+    pub(super) saw_any: bool,
     reached_installed: bool,
 }
 
@@ -243,10 +162,16 @@ pub(super) fn next_page_url(link: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::test_support::{serve, setup};
+    use crate::forges::forge::Forge;
+    use crate::forges::github::GitHub;
+    use crate::forges::test_support::{serve, setup};
     use serde_json::json;
     use wiremock::matchers::{path, query_param};
     use wiremock::{Mock, ResponseTemplate};
+
+    fn github() -> GitHub {
+        GitHub::new("o", "r")
+    }
 
     fn tag(name: &str) -> Release {
         Release {
@@ -292,8 +217,8 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let got = client
-            .fetch_releases("o", "r", range("1.0.0", "", false))
+        let got = github()
+            .fetch_releases(&client, range("1.0.0", "", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v3.0.0", "v2.0.0"]);
@@ -307,8 +232,8 @@ mod tests {
             .map(|number| tag(&format!("v{number}.0.0")))
             .collect();
         serve(&server, "/repos/o/r/releases", page).await;
-        let got = client
-            .fetch_releases("o", "r", range("", "25.0.0", false))
+        let got = github()
+            .fetch_releases(&client, range("", "25.0.0", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v25.0.0"]);
@@ -329,8 +254,8 @@ mod tests {
             ],
         )
         .await;
-        let got = client
-            .fetch_releases("o", "r", range("1.0.0", "2.0.0", false))
+        let got = github()
+            .fetch_releases(&client, range("1.0.0", "2.0.0", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v2.0.0", "v1.5.0"]);
@@ -345,8 +270,8 @@ mod tests {
             [tag("v0.34.2"), tag("v0.34.1"), tag("v0.34.0")],
         )
         .await;
-        let got = client
-            .fetch_releases("o", "r", range("0.34.0", "0.34.2", false))
+        let got = github()
+            .fetch_releases(&client, range("0.34.0", "0.34.2", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v0.34.2", "v0.34.1"]);
@@ -371,8 +296,8 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let got = client
-            .fetch_releases("o", "r", range("", "999.0.0", false))
+        let got = github()
+            .fetch_releases(&client, range("", "999.0.0", false))
             .await
             .unwrap();
         // list + latest + two by-tag lookups
@@ -391,8 +316,8 @@ mod tests {
             [tag("v1.19.3"), tag("v1.19.2")],
         )
         .await;
-        let got = client
-            .fetch_releases("o", "r", range("2.0.30", "2.0.31", false))
+        let got = github()
+            .fetch_releases(&client, range("2.0.30", "2.0.31", false))
             .await
             .unwrap();
         assert!(got.is_empty(), "{got:?}");
@@ -408,8 +333,8 @@ mod tests {
             [tag("v2.0.32"), tag("v2.0.30")],
         )
         .await;
-        let got = client
-            .fetch_releases("o", "r", range("2.0.30", "2.0.31", false))
+        let got = github()
+            .fetch_releases(&client, range("2.0.30", "2.0.31", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v2.0.32"]);
@@ -425,8 +350,8 @@ mod tests {
             [tag("v4.6.6"), tag("v4.6.5")],
         )
         .await;
-        let got = client
-            .fetch_releases("o", "r", range("4.6.5", "4.6.7", false))
+        let got = github()
+            .fetch_releases(&client, range("4.6.5", "4.6.7", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v4.6.7", "v4.6.6"]);
@@ -442,8 +367,8 @@ mod tests {
             [tag("v4.6.6"), tag("v4.6.5")],
         )
         .await;
-        let got = client
-            .fetch_releases("o", "r", range("4.6.6", "4.6.7", false))
+        let got = github()
+            .fetch_releases(&client, range("4.6.6", "4.6.7", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v4.6.7"]);
@@ -459,8 +384,8 @@ mod tests {
         serve(&server, "/repos/o/r/releases/latest", tag("b1100")).await;
         serve(&server, "/repos/o/r/releases/tags/v0.6.0", tag("v0.6.0")).await;
         serve(&server, "/repos/o/r/releases", page).await;
-        let got = client
-            .fetch_releases("o", "r", range("0.5.0", "0.6.0", false))
+        let got = github()
+            .fetch_releases(&client, range("0.5.0", "0.6.0", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v0.6.0"]);
@@ -485,8 +410,8 @@ mod tests {
         )
         .await;
         serve(&server, "/repos/o/r/releases", page).await;
-        let got = client
-            .fetch_releases("o", "r", range("1.24.0-pre", "1.25.0-pre", true))
+        let got = github()
+            .fetch_releases(&client, range("1.24.0-pre", "1.25.0-pre", true))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v1.25.0-pre"]);
@@ -501,8 +426,8 @@ mod tests {
             [tag("jq-1.8.2"), tag("jq-1.8.1"), tag("jq-1.8.0")],
         )
         .await;
-        let got = client
-            .fetch_releases("o", "r", range("1.8.1", "", false))
+        let got = github()
+            .fetch_releases(&client, range("1.8.1", "", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["jq-1.8.2"]);
@@ -518,8 +443,8 @@ mod tests {
             json!([{"name": "v2.0.0"}, {"name": "v1.0.0"}]),
         )
         .await;
-        let got = client
-            .fetch_releases("o", "r", range("1.0.0", "", false))
+        let got = github()
+            .fetch_releases(&client, range("1.0.0", "", false))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v2.0.0"]);
@@ -534,8 +459,8 @@ mod tests {
             .expect(0)
             .mount(&server)
             .await;
-        let got = client
-            .fetch_releases("o", "r", range("1.0.0", "", false))
+        let got = github()
+            .fetch_releases(&client, range("1.0.0", "", false))
             .await
             .unwrap();
         assert!(got.is_empty());
@@ -549,8 +474,8 @@ mod tests {
             .mount(&server)
             .await;
         assert!(
-            client
-                .fetch_releases("o", "r", range("1.0.0", "", false))
+            github()
+                .fetch_releases(&client, range("1.0.0", "", false))
                 .await
                 .is_err()
         );

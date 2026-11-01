@@ -1,12 +1,13 @@
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use brew_changes::github::{Client, resolve_source};
+use brew_changes::forges::{Client, resolve_source};
 use brew_changes::homebrew::{self, brew_info_runner};
 use brew_changes::ui::app::{Item, Outcome, Upgrade};
 use brew_changes::ui::keys::Keymap;
 use brew_changes::ui::run::{detect_dark_background, run};
 use brew_changes::ui::theme::ThemeConfig;
+use brew_changes::{record_timing, timed, timing, timing_start};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -24,6 +25,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run_app() -> Result<()> {
+    timing_start!(start);
+    timing::init()?;
     // Read before the slow brew calls so a typo fails fast.
     let (mut theme_config, theme_warnings) = ThemeConfig::load();
     let mut arguments = std::env::args().skip(1);
@@ -40,13 +43,18 @@ async fn run_app() -> Result<()> {
 
     println!("Checking for outdated packages...");
 
-    let packages = homebrew::outdated().await?;
+    let packages = timed!("brew outdated", homebrew::outdated().await)?;
     if packages.is_empty() {
         println!("Everything is up to date.");
         return Ok(());
     }
 
-    let infos = homebrew::resolve_info(brew_info_runner(), &packages).await;
+    let client = Client::new()?;
+    client.resolve_github_token();
+    let infos = timed!(
+        "brew info",
+        homebrew::resolve_info(brew_info_runner(), &packages).await
+    );
     let items = packages
         .into_iter()
         .zip(infos)
@@ -69,8 +77,12 @@ async fn run_app() -> Result<()> {
     for warning in warnings.into_iter().chain(theme_warnings) {
         eprintln!("{warning}");
     }
-    let (themes, active) = theme_config.resolve(detect_dark_background);
-    let (outcome, items) = run(items, keymap, themes, active, Client::new()?).await?;
+    let (themes, active) = timed!(
+        "theme and background detection",
+        theme_config.resolve(detect_dark_background)
+    );
+    record_timing!(start, "startup until the list is shown");
+    let (outcome, items) = run(items, keymap, themes, active, client).await?;
 
     if outcome != Outcome::UpgradeAll {
         match items

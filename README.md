@@ -149,7 +149,7 @@ cargo run                                          # the TUI
 cargo run --bin validate-changelogs -- 100         # top 100 formulae
 cargo run --bin validate-changelogs -- 100 -cask   # top 100 casks
 cargo run --bin validate-changelogs -- -outdated   # this machine's outdated packages
-scripts/downgrade-for-testing.sh jq bat            # create real outdated packages
+scripts/downgrade-for-testing.sh                   # create real outdated packages
 scripts/run-with-fake-brew.sh [--theme <name>]    # the TUI with fake brew/GitHub (no real upgrades)
 ```
 

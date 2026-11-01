@@ -1,6 +1,7 @@
 mod codeberg;
 mod fetch;
 mod forge;
+mod github;
 mod gitlab;
 mod releases;
 mod source;
@@ -14,11 +15,13 @@ use base64::Engine;
 use htmd::HtmlToMarkdown;
 use htmd::options::{BulletListMarker, HrStyle, Options};
 use serde::de::DeserializeOwned;
-use tokio::sync::OnceCell;
 use url::Url;
 
+use crate::{record_timing, timing_start};
+
 pub use fetch::{Changelog, Commit, Releases, Stage};
-pub use forge::{Forge, GitHub};
+pub use forge::Forge;
+pub use github::GitHub;
 pub use gitlab::GitLab;
 pub use releases::Release;
 pub use source::{Source, resolve_source};
@@ -30,10 +33,8 @@ const RAW_FETCH_ATTEMPTS: usize = 3;
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
-    api_base: String,
-    raw_base: String,
     retry_delay: Duration,
-    token: Arc<OnceCell<Option<String>>>,
+    github: Arc<github::GitHubApi>,
 }
 
 /// Lets a forge tell a particular status, like Forgejo's 404 for a repo
@@ -59,17 +60,10 @@ struct RawFetchError {
 
 impl Client {
     pub fn new() -> Result<Self> {
-        // Lets tests/e2e.rs point the real binary at a mock server.
-        if let Ok(base) = std::env::var("BREW_CHANGES_GITHUB_API") {
-            return Self::with_bases(&base, &format!("{base}/raw"));
-        }
-        Self::with_bases(
-            "https://api.github.com",
-            "https://raw.githubusercontent.com",
-        )
+        Self::with_github(github::GitHubApi::new())
     }
 
-    fn with_bases(api_base: &str, raw_base: &str) -> Result<Self> {
+    fn with_github(github: github::GitHubApi) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(TIMEOUT)
             .user_agent("brew-changes")
@@ -77,62 +71,58 @@ impl Client {
             .context("building HTTP client")?;
         Ok(Self {
             http,
-            api_base: api_base.into(),
-            raw_base: raw_base.into(),
             retry_delay: Duration::from_millis(300),
-            token: Arc::default(),
+            github: Arc::new(github),
         })
+    }
+
+    /// Looks up the GitHub token in the background (it may spawn `gh`), so
+    /// the first fetch doesn't wait for it.
+    pub fn resolve_github_token(&self) {
+        let github = self.github.clone();
+        tokio::spawn(async move {
+            github.token().await;
+        });
     }
 
     #[cfg(test)]
     fn for_test(base: &str) -> Self {
-        let mut client = Self::with_bases(base, &format!("{base}/raw")).expect("test client");
+        Self::for_test_with_token(base, None)
+    }
+
+    #[cfg(test)]
+    fn for_test_with_token(base: &str, token: Option<&str>) -> Self {
+        let mut client =
+            Self::with_github(github::GitHubApi::at(base).with_token(token)).expect("test client");
         client.retry_delay = Duration::from_millis(1);
-        client.token = Arc::new(OnceCell::new_with(Some(None)));
         client
     }
 
-    /// Resolved once because it may spawn `gh`.
-    async fn token(&self) -> Option<&str> {
-        self.token
-            .get_or_init(|| async {
-                for variable in ["GITHUB_TOKEN", "GH_TOKEN"] {
-                    if let Ok(value) = std::env::var(variable)
-                        && !value.is_empty()
-                    {
-                        return Some(value);
-                    }
-                }
-                // No `gh` on PATH, or not logged in, means unauthenticated requests.
-                let output = tokio::process::Command::new("gh")
-                    .args(["auth", "token"])
-                    .output()
-                    .await
-                    .ok()?;
-                let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
-                (output.status.success() && !token.is_empty()).then_some(token)
-            })
-            .await
-            .as_deref()
-    }
-
-    /// Also returns the Link header's next-page URL, which GitLab sends too.
     /// The GitHub token goes only to GitHub's API, never to another forge.
-    async fn get_json_page<T: DeserializeOwned>(&self, url: &str) -> Result<(T, Option<String>)> {
+    async fn get(&self, url: &str, github_accept: &str) -> reqwest::RequestBuilder {
         let mut request = self.http.get(url);
-        if url.starts_with(&format!("{}/", self.api_base)) {
-            request = request.header("Accept", "application/vnd.github+json");
-            if let Some(token) = self.token().await {
+        if self.github.owns(url) {
+            request = request.header("Accept", github_accept);
+            if let Some(token) = self.github.token().await {
                 request = request.bearer_auth(token);
             }
         }
+        request
+    }
+
+    /// Also returns the Link header's next-page URL, which GitLab sends too.
+    async fn get_json_page<T: DeserializeOwned>(&self, url: &str) -> Result<(T, Option<String>)> {
+        let is_github = self.github.owns(url);
+        let request = self.get(url, "application/vnd.github+json").await;
+        timing_start!(start);
         let response = request.send().await?;
         let status = response.status();
+        record_timing!(start, "GET {url} {status} (headers)");
         let rate_limited = response
             .headers()
             .get("x-ratelimit-remaining")
             .is_some_and(|remaining| remaining == "0");
-        if rate_limited && matches!(status.as_u16(), 403 | 429) {
+        if is_github && rate_limited && matches!(status.as_u16(), 403 | 429) {
             bail!(
                 "GET {url}: GitHub API rate limit exceeded; set GITHUB_TOKEN or run `gh auth login`"
             );
@@ -150,49 +140,13 @@ impl Client {
             .and_then(|value| value.to_str().ok())
             .and_then(releases::next_page_url);
         let body = response.bytes().await?;
+        record_timing!(start, "GET {url} {} bytes", body.len());
         let parsed = serde_json::from_slice(&body).with_context(|| format!("parsing {url}"))?;
         Ok((parsed, next))
     }
 
     async fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
         Ok(self.get_json_page(url).await?.0)
-    }
-
-    fn repo_url(&self, owner: &str, repo: &str, path: &str) -> String {
-        format!("{}/repos/{owner}/{repo}/{path}", self.api_base)
-    }
-
-    /// Falls back to raw content because the Contents API returns no content
-    /// for files over 1 MB (aws-cli's CHANGELOG.rst).
-    async fn fetch_github_file(
-        &self,
-        owner: &str,
-        repo: &str,
-        path: &str,
-        git_ref: Option<&str>,
-    ) -> Result<String> {
-        #[derive(serde::Deserialize)]
-        struct Contents {
-            #[serde(default)]
-            content: String,
-        }
-        let mut url = self.repo_url(owner, repo, &format!("contents/{path}"));
-        if let Some(git_ref) = git_ref {
-            url += &format!("?ref={git_ref}");
-        }
-        if let Ok(contents) = self.get_json::<Contents>(&url).await
-            && let Ok(decoded) =
-                base64::engine::general_purpose::STANDARD.decode(contents.content.replace('\n', ""))
-            && !decoded.is_empty()
-        {
-            return Ok(String::from_utf8_lossy(&decoded).into_owned());
-        }
-        let raw_url = format!(
-            "{}/{owner}/{repo}/{}/{path}",
-            self.raw_base,
-            git_ref.unwrap_or("HEAD")
-        );
-        Ok(self.fetch_raw(&raw_url).await?.0)
     }
 
     /// Returns the text and whether it was HTML (converted to Markdown).
@@ -220,8 +174,11 @@ impl Client {
             error: error.into(),
             retryable: true,
         };
-        let response = self.http.get(url).send().await.map_err(retryable)?;
+        let request = self.get(url, "application/vnd.github.raw").await;
+        timing_start!(start);
+        let response = request.send().await.map_err(retryable)?;
         let status = response.status();
+        record_timing!(start, "GET {url} {status} (headers)");
         if status != reqwest::StatusCode::OK {
             return Err(RawFetchError {
                 error: StatusError {
@@ -242,6 +199,7 @@ impl Client {
         // in a table row.
         let is_gitiles_text = !is_html && response.headers().contains_key("x-gitiles-object-type");
         let body = response.text().await.map_err(retryable)?;
+        record_timing!(start, "GET {url} {} bytes", body.len());
         if is_gitiles_text {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(body.trim())
@@ -451,6 +409,20 @@ mod tests {
         assert!(limited.contains("GITHUB_TOKEN"), "{limited}");
         let forbidden = error("/forbidden").await;
         assert!(forbidden.ends_with("status 403"), "{forbidden}");
+    }
+
+    #[tokio::test]
+    async fn other_forge_rate_limit_does_not_blame_github() {
+        let other_forge = MockServer::start().await;
+        Mock::given(path("/limited"))
+            .respond_with(ResponseTemplate::new(429).insert_header("x-ratelimit-remaining", "0"))
+            .mount(&other_forge)
+            .await;
+        let error = Client::for_test("http://127.0.0.1:9")
+            .get_json::<serde_json::Value>(&format!("{}/limited", other_forge.uri()))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").ends_with("status 429"), "{error:#}");
     }
 
     #[test]

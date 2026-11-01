@@ -1,7 +1,8 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use futures::FutureExt;
-use futures::future::{BoxFuture, join_all, ready};
+use futures::future::{BoxFuture, ready};
 use serde::Deserialize;
+use url::Url;
 
 use super::{Client, Commit, Release};
 
@@ -126,6 +127,13 @@ impl Repo {
         }
     }
 
+    /// The last segment is the repo, the ones before it its owner.
+    pub(super) fn from_segments(base: &str, segments: &[String]) -> Option<Self> {
+        let (repo, owner) = segments.split_last()?;
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        (!owner.is_empty() && !repo.is_empty()).then(|| Self::new(base, owner.join("/"), repo))
+    }
+
     pub(super) fn path(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
@@ -135,113 +143,30 @@ impl Repo {
     }
 }
 
-#[derive(Debug)]
-pub struct GitHub {
-    owner: String,
-    repo: String,
+/// A URL on a forge that can be self-hosted, split for each forge's `detect`.
+pub(super) struct ForgeUrl {
+    pub(super) host: String,
+    pub(super) base: String,
+    /// The path up to GitLab's `/-/` separator.
+    pub(super) segments: Vec<String>,
 }
 
-impl GitHub {
-    pub fn new(owner: impl Into<String>, repo: impl Into<String>) -> Self {
-        Self {
-            owner: owner.into(),
-            repo: repo.into(),
-        }
-    }
-}
-
-impl Forge for GitHub {
-    fn name(&self) -> &'static str {
-        "GitHub"
-    }
-
-    fn path(&self) -> String {
-        format!("{}/{}", self.owner, self.repo)
-    }
-
-    fn repo_url(&self) -> String {
-        format!("https://github.com/{}", self.path())
-    }
-
-    fn display_name(&self) -> String {
-        self.path()
-    }
-
-    fn releases_url(&self) -> String {
-        format!("{}/releases", self.repo_url())
-    }
-
-    fn list_root<'a>(&'a self, client: &'a Client) -> BoxFuture<'a, Result<Vec<String>>> {
-        async move {
-            let entries = client
-                .get_json(&client.repo_url(&self.owner, &self.repo, "contents/"))
-                .await
-                .with_context(|| format!("listing files of {}", self.path()))?;
-            Ok(names_of_kind(entries, "file"))
-        }
-        .boxed()
-    }
-
-    fn fetch_file<'a>(
-        &'a self,
-        client: &'a Client,
-        filename: &'a str,
-    ) -> BoxFuture<'a, Result<String>> {
-        client
-            .fetch_github_file(&self.owner, &self.repo, filename, None)
-            .boxed()
-    }
-
-    fn fetch_releases<'a>(
-        &'a self,
-        client: &'a Client,
-        range: Range<'a>,
-    ) -> BoxFuture<'a, Result<Vec<Release>>> {
-        client
-            .fetch_releases(&self.owner, &self.repo, range)
-            .boxed()
-    }
-
-    /// The most recently committed candidate wins, being the one still maintained.
-    fn choose_changelog<'a>(
-        &'a self,
-        client: &'a Client,
-        candidates: Vec<String>,
-    ) -> BoxFuture<'a, Option<String>> {
-        async move {
-            if candidates.len() <= 1 {
-                return candidates.into_iter().next();
-            }
-            let dates = join_all(
-                candidates
-                    .iter()
-                    .map(|name| client.last_commit_date(&self.owner, &self.repo, name)),
-            )
-            .await;
-            // Ties and unknown dates go to the earlier candidate.
-            let mut best: Option<(String, Option<String>)> = None;
-            for (name, date) in candidates.into_iter().zip(dates) {
-                let later = |best_date: &Option<String>| match (&date, best_date) {
-                    (Some(date), Some(best_date)) => date > best_date,
-                    _ => false,
-                };
-                if best.as_ref().is_none_or(|(_, best_date)| later(best_date)) {
-                    best = Some((name, date));
-                }
-            }
-            best.map(|(name, _)| name)
-        }
-        .boxed()
-    }
-
-    fn fetch_commits<'a>(
-        &'a self,
-        client: &'a Client,
-        installed: &'a str,
-        current: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Commit>>> {
-        client
-            .fetch_commits(&self.owner, &self.repo, installed, current)
-            .boxed()
+impl ForgeUrl {
+    pub(super) fn parse(url: &str) -> Option<Self> {
+        let parsed = Url::parse(url).ok()?;
+        let segments = parsed
+            .path()
+            .trim_matches('/')
+            .split("/-/")
+            .next()?
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(String::from)
+            .collect();
+        Some(Self {
+            host: parsed.host_str()?.into(),
+            base: parsed.origin().ascii_serialization(),
+            segments,
+        })
     }
 }

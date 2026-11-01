@@ -9,7 +9,6 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use base64::Engine;
 use serde_json::{Value, json};
 use wiremock::matchers::path;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -50,27 +49,7 @@ fn brew_shim(test: &str, outdated: Value) -> Result<PathBuf> {
             .to_string(),
     )?;
     let shim = dir.join("bin/brew");
-    fs::write(
-        &shim,
-        format!(
-            r#"#!/bin/sh
-dir='{}'
-echo "$*" >> "$dir/calls.log"
-case "$1 $3" in
-  outdated*) cat "$dir/outdated.json" ;;
-  "info --formula") cat "$dir/info-formula.json" ;;
-  "info --cask") cat "$dir/info-cask.json" ;;
-  upgrade*)
-    if [ -f "$dir/upgrade-stderr" ]; then
-      cat "$dir/upgrade-stderr" >&2
-      exit 1
-    fi ;;
-  *) exit 1 ;;
-esac
-"#,
-            dir.display()
-        ),
-    )?;
+    fs::write(&shim, include_str!("../scripts/fake-brew"))?;
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))?;
     Ok(dir)
 }
@@ -91,10 +70,8 @@ async fn mock_github() -> MockServer {
         )
         .mount(&server)
         .await;
-    Mock::given(path("/repos/o/r/contents/CHANGELOG.md"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"content": base64::engine::general_purpose::STANDARD.encode(CHANGELOG)}),
-        ))
+    Mock::given(path("/raw/o/r/HEAD/CHANGELOG.md"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CHANGELOG))
         .mount(&server)
         .await;
     server

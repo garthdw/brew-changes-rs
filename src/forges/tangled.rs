@@ -4,7 +4,7 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 use tokio::sync::OnceCell;
 
-use super::forge::{Forge, Range, Repo};
+use super::forge::{Forge, ForgeUrl, Range, Repo};
 use super::releases::null_as_default;
 use super::{Client, Release};
 
@@ -21,11 +21,23 @@ struct Api {
 }
 
 impl Tangled {
+    #[cfg(test)]
     pub fn new(base: impl Into<String>, owner: impl Into<String>, repo: impl Into<String>) -> Self {
+        Self::from_repo(Repo::new(base, owner, repo))
+    }
+
+    fn from_repo(repo: Repo) -> Self {
         Self {
-            repo: Repo::new(base, owner, repo),
+            repo,
             api: OnceCell::new(),
         }
+    }
+
+    pub(super) fn detect(url: &ForgeUrl) -> Option<Self> {
+        if url.host != "tangled.org" && url.host != "tangled.sh" {
+            return None;
+        }
+        Repo::from_segments(&url.base, url.segments.get(..2)?).map(Self::from_repo)
     }
 
     /// Tangled's API takes the repo's DID rather than its name; the web raw
