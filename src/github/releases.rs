@@ -20,6 +20,14 @@ pub struct Release {
     pub prerelease: bool,
 }
 
+impl Release {
+    /// ImageMagick's release bodies are just the version.
+    pub fn lacks_notes(&self) -> bool {
+        let body = self.body.trim();
+        body.is_empty() || body.trim_start_matches('v') == self.tag_name.trim_start_matches('v')
+    }
+}
+
 // GitHub sends `null` for an empty release body.
 fn null_as_default<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
@@ -531,6 +539,19 @@ mod tests {
             serde_json::from_value(json!({"tag_name": "v1", "body": null, "published_at": null}))
                 .unwrap();
         assert_eq!(release, tag("v1"));
+    }
+
+    #[test]
+    fn notes_missing_when_empty_or_only_the_version() {
+        let release = |tag_name: &str, body: &str| Release {
+            body: body.into(),
+            ..tag(tag_name)
+        };
+        assert!(release("v1.2", "").lacks_notes());
+        assert!(release("v1.2", " \r\n").lacks_notes());
+        assert!(release("7.1.2-35", "7.1.2-35").lacks_notes());
+        assert!(release("v1.2", "1.2\n").lacks_notes());
+        assert!(!release("v1.2", "- fix a crash").lacks_notes());
     }
 
     #[test]

@@ -505,7 +505,7 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
                 } else {
                     &release.published_at
                 };
-                let body = if release.body.is_empty() {
+                let body = if release.lacks_notes() {
                     "_no release notes_"
                 } else {
                     &release.body
@@ -1158,5 +1158,25 @@ mod tests {
             "(from GitHub releases)\n\n### v0 (unknown date)\n\n_no release notes_\n\n"
         ));
         assert_eq!(body.matches("### ").count(), 10);
+    }
+
+    #[test]
+    fn release_body_of_only_the_version_counts_as_no_notes() {
+        let changelog = Changelog::Releases {
+            fallback_file: None,
+            file_error: None,
+            result: Ok(Releases {
+                list: vec![Release {
+                    tag_name: "7.1.2-35".into(),
+                    body: "7.1.2-35".into(),
+                    ..Default::default()
+                }],
+                found: true,
+            }),
+        };
+        assert_eq!(
+            changelog_body(&Item::default(), &changelog),
+            "(from GitHub releases)\n\n### 7.1.2-35 (unknown date)\n\n_no release notes_\n\n"
+        );
     }
 }
