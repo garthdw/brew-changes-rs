@@ -42,6 +42,8 @@ scripts/run-with-fake-brew.sh [args]               # the TUI with a fake brew an
 goreleaser release --snapshot --skip=publish --clean   # stages prebuilt/brew-changes-<target>/brew-changes (release.yml builds them)
 ```
 
+The shell is zsh, which doesn't word-split unquoted variables: with `args="--filter a --filter b"`, `validate-changelogs $args` gets one argument, so the filter is silently ignored and it validates the default top packages instead. Use an array (`args=(--filter a --filter b)`, then `"${args[@]}"`) or run the command under `bash -c`. Check that the output lists the packages you asked for.
+
 ## Architecture
 
 - `homebrew`: `brew outdated`/`brew info` JSON (info batched 50 per call, 8 at once, failing batches bisected), `brew upgrade`.
