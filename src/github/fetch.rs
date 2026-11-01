@@ -238,13 +238,16 @@ mod tests {
     use crate::github::gitlab::GitLab;
     use crate::github::tangled::Tangled;
     use crate::github::test_support::{serve, setup};
-    use base64::Engine;
     use serde_json::json;
-    use wiremock::matchers::{path, query_param};
+    use wiremock::matchers::{header, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn base64_encode(text: &str) -> String {
-        base64::engine::general_purpose::STANDARD.encode(text)
+    async fn serve_file(server: &MockServer, route: &str, text: &str) {
+        Mock::given(path(route))
+            .and(header("accept", "application/vnd.github.raw"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(text))
+            .mount(server)
+            .await;
     }
 
     const GITHUB_REPO: fn() -> GitHub = || GitHub::new("o", "r");
@@ -333,10 +336,10 @@ mod tests {
     #[tokio::test]
     async fn manual_github_blob_url_uses_contents_api() {
         let (server, client) = setup().await;
-        serve(
+        serve_file(
             &server,
             "/repos/owner/repo/contents/CHANGELOG.md",
-            json!({"content": base64_encode("## 2.0.0\nnew stuff\n## 1.0.0\nold\n")}),
+            "## 2.0.0\nnew stuff\n## 1.0.0\nold\n",
         )
         .await;
         let got = client
@@ -354,12 +357,10 @@ mod tests {
     #[tokio::test]
     async fn github_file_falls_back_to_raw() {
         let (server, client) = setup().await;
-        serve(
-            &server,
-            "/repos/o/r/contents/BIG.rst",
-            json!({"content": ""}),
-        )
-        .await;
+        Mock::given(path("/repos/o/r/contents/BIG.rst"))
+            .respond_with(ResponseTemplate::new(403).insert_header("x-ratelimit-remaining", "0"))
+            .mount(&server)
+            .await;
         Mock::given(path("/raw/o/r/HEAD/BIG.rst"))
             .respond_with(ResponseTemplate::new(200).set_body_string("big"))
             .mount(&server)
@@ -567,11 +568,10 @@ mod tests {
     ) -> (MockServer, Client) {
         let (server, client) = setup().await;
         serve(&server, "/repos/o/r/contents/", listing(&["CHANGELOG.md"])).await;
-        let content = base64_encode(&format!("## {changelog_version}\nnotes\n"));
-        serve(
+        serve_file(
             &server,
             "/repos/o/r/contents/CHANGELOG.md",
-            json!({"content": content}),
+            &format!("## {changelog_version}\nnotes\n"),
         )
         .await;
         serve(&server, "/repos/o/r/releases", releases).await;

@@ -9,7 +9,6 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use base64::Engine;
 use serde_json::{Value, json};
 use wiremock::matchers::path;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -92,9 +91,7 @@ async fn mock_github() -> MockServer {
         .mount(&server)
         .await;
     Mock::given(path("/repos/o/r/contents/CHANGELOG.md"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"content": base64::engine::general_purpose::STANDARD.encode(CHANGELOG)}),
-        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CHANGELOG))
         .mount(&server)
         .await;
     server

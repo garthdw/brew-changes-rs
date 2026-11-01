@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use base64::Engine;
 use futures::FutureExt;
 use futures::future::{BoxFuture, join_all};
 use serde::Deserialize;
@@ -7,6 +6,7 @@ use tokio::sync::OnceCell;
 
 use super::forge::{Forge, Range, names_of_kind};
 use super::{Client, Commit, Release};
+use crate::timing::timed;
 use crate::version::matches_tag;
 
 const MAX_COMMIT_PAGES: usize = 3;
@@ -63,11 +63,14 @@ impl GitHubApi {
                     }
                 }
                 // No `gh` on PATH, or not logged in, means unauthenticated requests.
-                let output = tokio::process::Command::new("gh")
-                    .args(["auth", "token"])
-                    .output()
-                    .await
-                    .ok()?;
+                let output = timed(
+                    "gh auth token",
+                    tokio::process::Command::new("gh")
+                        .args(["auth", "token"])
+                        .output(),
+                )
+                .await
+                .ok()?;
                 let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
                 (output.status.success() && !token.is_empty()).then_some(token)
             })
@@ -101,29 +104,21 @@ impl GitHub {
         )
     }
 
-    /// Falls back to raw content because the Contents API returns no content
-    /// for files over 1 MB (aws-cli's CHANGELOG.rst).
+    /// The raw media type serves files up to 100 MB, where JSON stops at
+    /// 1 MB (aws-cli's CHANGELOG.rst). raw.githubusercontent.com, outside the
+    /// API's rate limit, is the fallback when the API fails.
     pub(super) async fn fetch_file_at(
         &self,
         client: &Client,
         path: &str,
         git_ref: Option<&str>,
     ) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Contents {
-            #[serde(default)]
-            content: String,
-        }
         let mut url = self.api_url(client, &format!("contents/{path}"));
         if let Some(git_ref) = git_ref {
             url += &format!("?ref={git_ref}");
         }
-        if let Ok(contents) = client.get_json::<Contents>(&url).await
-            && let Ok(decoded) =
-                base64::engine::general_purpose::STANDARD.decode(contents.content.replace('\n', ""))
-            && !decoded.is_empty()
-        {
-            return Ok(String::from_utf8_lossy(&decoded).into_owned());
+        if let Ok((content, _)) = client.fetch_raw(&url).await {
+            return Ok(content);
         }
         let raw_url = format!(
             "{}/{}/{}/{}/{path}",

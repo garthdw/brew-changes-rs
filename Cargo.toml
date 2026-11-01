@@ -38,3 +38,9 @@ wiremock = "0.6.5"
 lto = true
 codegen-units = 1
 strip = true
+
+# For `cargo flamegraph --profile profiling`: release, but with symbols.
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = true

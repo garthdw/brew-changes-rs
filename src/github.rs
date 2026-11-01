@@ -8,7 +8,7 @@ mod source;
 mod tangled;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -16,6 +16,8 @@ use htmd::HtmlToMarkdown;
 use htmd::options::{BulletListMarker, HrStyle, Options};
 use serde::de::DeserializeOwned;
 use url::Url;
+
+use crate::timing;
 
 pub use fetch::{Changelog, Commit, Releases, Stage};
 pub use forge::Forge;
@@ -74,6 +76,15 @@ impl Client {
         })
     }
 
+    /// Looks up the GitHub token in the background (it may spawn `gh`), so
+    /// the first fetch doesn't wait for it.
+    pub fn resolve_github_token(&self) {
+        let github = self.github.clone();
+        tokio::spawn(async move {
+            github.token().await;
+        });
+    }
+
     #[cfg(test)]
     fn for_test(base: &str) -> Self {
         Self::for_test_with_token(base, None)
@@ -87,19 +98,26 @@ impl Client {
         client
     }
 
-    /// Also returns the Link header's next-page URL, which GitLab sends too.
     /// The GitHub token goes only to GitHub's API, never to another forge.
-    async fn get_json_page<T: DeserializeOwned>(&self, url: &str) -> Result<(T, Option<String>)> {
+    async fn get(&self, url: &str, github_accept: &str) -> reqwest::RequestBuilder {
         let mut request = self.http.get(url);
-        let is_github = self.github.owns(url);
-        if is_github {
-            request = request.header("Accept", "application/vnd.github+json");
+        if self.github.owns(url) {
+            request = request.header("Accept", github_accept);
             if let Some(token) = self.github.token().await {
                 request = request.bearer_auth(token);
             }
         }
+        request
+    }
+
+    /// Also returns the Link header's next-page URL, which GitLab sends too.
+    async fn get_json_page<T: DeserializeOwned>(&self, url: &str) -> Result<(T, Option<String>)> {
+        let is_github = self.github.owns(url);
+        let request = self.get(url, "application/vnd.github+json").await;
+        let start = Instant::now();
         let response = request.send().await?;
         let status = response.status();
+        timing::record(format!("GET {url} {status} (headers)"), start);
         let rate_limited = response
             .headers()
             .get("x-ratelimit-remaining")
@@ -122,6 +140,7 @@ impl Client {
             .and_then(|value| value.to_str().ok())
             .and_then(releases::next_page_url);
         let body = response.bytes().await?;
+        timing::record(format!("GET {url} {} bytes", body.len()), start);
         let parsed = serde_json::from_slice(&body).with_context(|| format!("parsing {url}"))?;
         Ok((parsed, next))
     }
@@ -155,8 +174,11 @@ impl Client {
             error: error.into(),
             retryable: true,
         };
-        let response = self.http.get(url).send().await.map_err(retryable)?;
+        let request = self.get(url, "application/vnd.github.raw").await;
+        let start = Instant::now();
+        let response = request.send().await.map_err(retryable)?;
         let status = response.status();
+        timing::record(format!("GET {url} {status} (headers)"), start);
         if status != reqwest::StatusCode::OK {
             return Err(RawFetchError {
                 error: StatusError {
@@ -177,6 +199,7 @@ impl Client {
         // in a table row.
         let is_gitiles_text = !is_html && response.headers().contains_key("x-gitiles-object-type");
         let body = response.text().await.map_err(retryable)?;
+        timing::record(format!("GET {url} {} bytes", body.len()), start);
         if is_gitiles_text {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(body.trim())

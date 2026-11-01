@@ -92,7 +92,6 @@ EOF
 chmod +x "$dir/bin/brew"
 
 cat >"$dir/github.py" <<'EOF'
-import base64
 import json
 import os
 import sys
@@ -139,10 +138,6 @@ fn main() {
 """
 
 
-def contents(text):
-    return {"content": base64.b64encode(text.encode()).decode(), "encoding": "base64"}
-
-
 def release(tag, date, body, prerelease=False):
     return {"tag_name": tag, "published_at": date, "body": body, "prerelease": prerelease}
 
@@ -152,7 +147,7 @@ ROUTES = {
         {"name": "README.md", "type": "file"},
         {"name": "CHANGELOG.md", "type": "file"},
     ],
-    "/repos/fake/md-tool/contents/CHANGELOG.md": contents(CHANGELOG),
+    "/repos/fake/md-tool/contents/CHANGELOG.md": CHANGELOG,
     "/repos/fake/release-tool/contents/": [{"name": "README.md", "type": "file"}],
     "/repos/fake/release-tool/releases": [
         release("v2.1.0", "2026-10-01T00:00:00Z", "## What's changed\n\n- Faster startup\n- `--json` output\n\n```sh\nrelease-tool --json | jq .\n```"),
@@ -176,9 +171,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = ROUTES.get(urlsplit(self.path).path)
         self.send_response(404 if body is None else 200)
-        self.send_header("Content-Type", "application/json")
+        # Files are served as the raw media type, everything else as JSON.
+        is_file = isinstance(body, str)
+        self.send_header("Content-Type", "text/plain" if is_file else "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({"message": "Not Found"} if body is None else body).encode())
+        self.wfile.write((body if is_file else json.dumps({"message": "Not Found"} if body is None else body)).encode())
 
     def log_message(self, format, *args):
         with open(log_file, "a") as log:

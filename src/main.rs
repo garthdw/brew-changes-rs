@@ -1,8 +1,10 @@
 use std::process::ExitCode;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use brew_changes::github::{Client, resolve_source};
 use brew_changes::homebrew::{self, brew_info_runner};
+use brew_changes::timing::{self, timed};
 use brew_changes::ui::app::{Item, Outcome, Upgrade};
 use brew_changes::ui::keys::Keymap;
 use brew_changes::ui::run::{detect_dark_background, run};
@@ -24,6 +26,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run_app() -> Result<()> {
+    let start = Instant::now();
+    timing::init()?;
     // Read before the slow brew calls so a typo fails fast.
     let (mut theme_config, theme_warnings) = ThemeConfig::load();
     let mut arguments = std::env::args().skip(1);
@@ -40,13 +44,19 @@ async fn run_app() -> Result<()> {
 
     println!("Checking for outdated packages...");
 
-    let packages = homebrew::outdated().await?;
+    let packages = timed("brew outdated", homebrew::outdated()).await?;
     if packages.is_empty() {
         println!("Everything is up to date.");
         return Ok(());
     }
 
-    let infos = homebrew::resolve_info(brew_info_runner(), &packages).await;
+    let client = Client::new()?;
+    client.resolve_github_token();
+    let infos = timed(
+        "brew info",
+        homebrew::resolve_info(brew_info_runner(), &packages),
+    )
+    .await;
     let items = packages
         .into_iter()
         .zip(infos)
@@ -69,8 +79,11 @@ async fn run_app() -> Result<()> {
     for warning in warnings.into_iter().chain(theme_warnings) {
         eprintln!("{warning}");
     }
+    let theme_start = Instant::now();
     let (themes, active) = theme_config.resolve(detect_dark_background);
-    let (outcome, items) = run(items, keymap, themes, active, Client::new()?).await?;
+    timing::record("theme and background detection", theme_start);
+    timing::record("startup until the list is shown", start);
+    let (outcome, items) = run(items, keymap, themes, active, client).await?;
 
     if outcome != Outcome::UpgradeAll {
         match items

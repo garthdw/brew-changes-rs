@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
     };
 
     let infos = homebrew::resolve_info(brew_info_runner(), &packages).await;
+    brew_changes::timing::init()?;
     let client = Client::new()?;
     let checks = packages
         .into_iter()
