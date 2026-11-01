@@ -1,47 +1,18 @@
+use std::sync::Arc;
+
 use url::Url;
+
+use super::forge::{Forge, GitHub};
+use super::gitlab::GitLab;
+use super::tangled::Tangled;
 
 use crate::changelog::Order;
 use crate::{config, template};
 
-/// Where the repo is hosted. `base` is the origin ("https://gitlab.gnome.org"),
-/// since self-hosted GitLab instances all serve the same API.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub enum Forge {
-    #[default]
-    GitHub,
-    GitLab {
-        base: String,
-    },
-    Tangled {
-        base: String,
-    },
-}
-
-impl Forge {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::GitHub => "GitHub",
-            Self::GitLab { .. } => "GitLab",
-            Self::Tangled { .. } => "Tangled",
-        }
-    }
-
-    /// Tangled has tags but no releases.
-    pub fn releases_label(&self) -> String {
-        match self {
-            Self::Tangled { .. } => format!("{} tags", self.name()),
-            _ => format!("{} releases", self.name()),
-        }
-    }
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Source {
-    /// Empty when no repo is known. A GitLab owner can be a nested group
-    /// ("group/subgroup").
-    pub owner: String,
-    pub repo: String,
-    pub forge: Forge,
+    /// `None` when no repo is known.
+    pub forge: Option<Arc<dyn Forge>>,
     pub manual_url: String,
     pub prereleases_only: bool,
     /// The repo's commits between two versions whose last component is the
@@ -56,37 +27,35 @@ pub struct Source {
 }
 
 impl Source {
-    pub fn has_repo(&self) -> bool {
-        !self.owner.is_empty()
+    #[cfg(test)]
+    pub fn with_forge(forge: impl Forge + 'static) -> Self {
+        Self {
+            forge: Some(Arc::new(forge)),
+            ..Default::default()
+        }
     }
 
     pub fn repo_url(&self) -> Option<String> {
-        let base = match &self.forge {
-            Forge::GitHub => "https://github.com",
-            Forge::GitLab { base } | Forge::Tangled { base } => base,
-        };
-        self.has_repo()
-            .then(|| format!("{base}/{}/{}", self.owner, self.repo))
+        self.forge.as_ref().map(|forge| forge.repo_url())
     }
 
     pub fn file_url(&self, filename: &str) -> Option<String> {
-        let separator = match self.forge {
-            Forge::GitLab { .. } => "/-",
-            _ => "",
-        };
-        Some(format!(
-            "{}{separator}/blob/HEAD/{filename}",
-            self.repo_url()?
-        ))
+        self.forge.as_ref().map(|forge| forge.file_url(filename))
     }
 
     pub fn releases_url(&self) -> Option<String> {
-        let path = match self.forge {
-            Forge::GitHub => "/releases",
-            Forge::GitLab { .. } => "/-/releases",
-            Forge::Tangled { .. } => "/tags",
-        };
-        Some(format!("{}{path}", self.repo_url()?))
+        self.forge.as_ref().map(|forge| forge.releases_url())
+    }
+
+    /// Without a repo, messages fall back to GitHub's wording.
+    pub fn forge_name(&self) -> &'static str {
+        self.forge.as_ref().map_or("GitHub", |forge| forge.name())
+    }
+
+    pub fn releases_label(&self) -> String {
+        self.forge
+            .as_ref()
+            .map_or_else(|| "GitHub releases".into(), |forge| forge.releases_label())
     }
 }
 
@@ -95,17 +64,15 @@ impl Source {
 /// `urls` are tried in order for a repo; the config's `repo` is on GitHub.
 pub fn resolve_source(name: &str, version: &str, urls: &[&str]) -> Source {
     let entry = config::get(name);
-    let (forge, owner, repo) = if !entry.repo.is_empty() {
+    let forge = if !entry.repo.is_empty() {
         let (owner, repo) = entry.repo.split_once('/').unwrap_or((&entry.repo, ""));
-        (Forge::GitHub, owner.to_string(), repo.to_string())
+        Some(Arc::new(GitHub::new(owner, repo)) as Arc<dyn Forge>)
     } else if entry.url.is_empty() {
-        resolve_repo(urls).unwrap_or_default()
+        resolve_repo(urls)
     } else {
-        Default::default()
+        None
     };
     Source {
-        owner,
-        repo,
         forge,
         manual_url: template::expand(&entry.url, version),
         prereleases_only: entry.prerelease,
@@ -162,13 +129,9 @@ fn parse_github_url(url: &str) -> Option<GitHubUrl<'_>> {
     })
 }
 
-fn resolve_repo(urls: &[&str]) -> Option<(Forge, String, String)> {
+fn resolve_repo(urls: &[&str]) -> Option<Arc<dyn Forge>> {
     urls.iter().find_map(|url| match parse_github_url(url) {
-        Some(parsed) => Some((
-            Forge::GitHub,
-            parsed.owner.to_string(),
-            parsed.repo.to_string(),
-        )),
+        Some(parsed) => Some(Arc::new(GitHub::new(parsed.owner, parsed.repo)) as Arc<dyn Forge>),
         None => parse_other_forge_url(url),
     })
 }
@@ -176,7 +139,7 @@ fn resolve_repo(urls: &[&str]) -> Option<(Forge, String, String)> {
 /// GitLab is any `gitlab.*` host. Its project paths can nest groups, so the
 /// path runs up to GitLab's `/-/` separator or a pre-separator route
 /// (`/uploads/`, `/repository/`); Tangled's is always `owner/repo`.
-fn parse_other_forge_url(url: &str) -> Option<(Forge, String, String)> {
+fn parse_other_forge_url(url: &str) -> Option<Arc<dyn Forge>> {
     const GITLAB_ROUTES: [&str; 2] = ["uploads", "repository"];
     let parsed = Url::parse(url).ok()?;
     let host = parsed.host_str()?;
@@ -188,7 +151,7 @@ fn parse_other_forge_url(url: &str) -> Option<(Forge, String, String)> {
         .split('/')
         .filter(|segment| !segment.is_empty())
         .collect();
-    let forge = if host.starts_with("gitlab.") {
+    let new_forge: fn(String, String, &str) -> Arc<dyn Forge> = if host.starts_with("gitlab.") {
         // Instance routes, not projects: the API and `/-/project/<id>/uploads`.
         if matches!(segments.first(), Some(&"api" | &"-")) {
             return None;
@@ -199,16 +162,16 @@ fn parse_other_forge_url(url: &str) -> Option<(Forge, String, String)> {
         {
             segments.truncate(route);
         }
-        Forge::GitLab { base }
+        |base, owner, repo| Arc::new(GitLab::new(base, owner, repo))
     } else if host == "tangled.org" || host == "tangled.sh" {
         segments.truncate(2);
-        Forge::Tangled { base }
+        |base, owner, repo| Arc::new(Tangled::new(base, owner, repo))
     } else {
         return None;
     };
     let (repo, owner) = segments.split_last()?;
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
-    (!owner.is_empty() && !repo.is_empty()).then(|| (forge, owner.join("/"), repo.to_string()))
+    (!owner.is_empty() && !repo.is_empty()).then(|| new_forge(base, owner.join("/"), repo))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -246,20 +209,10 @@ mod tests {
     #[test]
     fn resolve_repo_other_forges() {
         let gitlab = |base: &str, owner: &str, repo: &str| {
-            Some((
-                Forge::GitLab { base: base.into() },
-                owner.to_string(),
-                repo.to_string(),
-            ))
+            Some(Arc::new(GitLab::new(base, owner, repo)) as Arc<dyn Forge>)
         };
         let tangled = |owner: &str, repo: &str| {
-            Some((
-                Forge::Tangled {
-                    base: "https://tangled.org".into(),
-                },
-                owner.to_string(),
-                repo.to_string(),
-            ))
+            Some(Arc::new(Tangled::new("https://tangled.org", owner, repo)) as Arc<dyn Forge>)
         };
         let cases = [
             (
@@ -304,13 +257,7 @@ mod tests {
 
     #[test]
     fn repo_links_per_forge() {
-        let source = |forge| Source {
-            owner: "o".into(),
-            repo: "r".into(),
-            forge,
-            ..Default::default()
-        };
-        let github = source(Forge::GitHub);
+        let github = Source::with_forge(GitHub::new("o", "r"));
         assert_eq!(github.repo_url().as_deref(), Some("https://github.com/o/r"));
         assert_eq!(
             github.file_url("NEWS").as_deref(),
@@ -320,9 +267,7 @@ mod tests {
             github.releases_url().as_deref(),
             Some("https://github.com/o/r/releases")
         );
-        let gitlab = source(Forge::GitLab {
-            base: "https://gitlab.gnome.org".into(),
-        });
+        let gitlab = Source::with_forge(GitLab::new("https://gitlab.gnome.org", "o", "r"));
         assert_eq!(
             gitlab.file_url("NEWS").as_deref(),
             Some("https://gitlab.gnome.org/o/r/-/blob/HEAD/NEWS")
@@ -331,9 +276,7 @@ mod tests {
             gitlab.releases_url().as_deref(),
             Some("https://gitlab.gnome.org/o/r/-/releases")
         );
-        let tangled = source(Forge::Tangled {
-            base: "https://tangled.org".into(),
-        });
+        let tangled = Source::with_forge(Tangled::new("https://tangled.org", "o", "r"));
         assert_eq!(
             tangled.file_url("NEWS").as_deref(),
             Some("https://tangled.org/o/r/blob/HEAD/NEWS")
@@ -348,7 +291,7 @@ mod tests {
     #[test]
     fn resolve_repo_cases() {
         let some =
-            |owner: &str, repo: &str| Some((Forge::GitHub, owner.to_string(), repo.to_string()));
+            |owner: &str, repo: &str| Some(Arc::new(GitHub::new(owner, repo)) as Arc<dyn Forge>);
         let cases = [
             (
                 "https://github.com/owner/repo",
@@ -413,11 +356,7 @@ mod tests {
 
     #[test]
     fn resolve_source_cases() {
-        let src = |owner: &str, repo: &str| Source {
-            owner: owner.into(),
-            repo: repo.into(),
-            ..Default::default()
-        };
+        let src = |owner: &str, repo: &str| Source::with_forge(GitHub::new(owner, repo));
         let cases = [
             (
                 "ripgrep",

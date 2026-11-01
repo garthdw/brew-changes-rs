@@ -15,7 +15,7 @@ use super::app::{App, FOOTER_LINES, Item, Popup, Upgrade};
 use super::keys::{self, Action};
 use super::markdown::{self, Link};
 use super::theme::Theme;
-use crate::github::{Forge, Stage};
+use crate::github::Stage;
 
 /// A popup's borders and padding, in lines.
 pub const POPUP_CHROME: u16 = 4;
@@ -176,15 +176,8 @@ fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
         );
     }
     let source = &item.source;
-    let source_hint = if let Forge::GitHub = source.forge
-        && source.has_repo()
-    {
-        format!("[{}/{}]", source.owner, source.repo)
-    } else if let Some(url) = source.repo_url() {
-        format!(
-            "[{}]",
-            url.split_once("://").map_or(url.as_str(), |(_, rest)| rest)
-        )
+    let source_hint = if let Some(forge) = &source.forge {
+        format!("[{}]", forge.display_name())
     } else if !source.manual_url.is_empty() {
         "[known changelog]".into()
     } else {
@@ -541,7 +534,7 @@ fn draw_popup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::Source;
+    use crate::github::{GitHub, Source};
     use crate::ui::app::Message;
     use crate::ui::keys::Keymap;
     use crate::ui::theme::ThemeConfig;
@@ -572,11 +565,7 @@ mod tests {
     }
 
     fn repo_source() -> Source {
-        Source {
-            owner: "o".into(),
-            repo: "r".into(),
-            ..Default::default()
-        }
+        Source::with_forge(GitHub::new("o", "r"))
     }
 
     fn screen(app: &App) -> String {

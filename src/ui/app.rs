@@ -478,8 +478,8 @@ fn body_markdown(item: &Item) -> Option<String> {
 
 pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
     let manual = &item.source.manual_url;
-    let forge = item.source.forge.name();
-    let releases = item.source.forge.releases_label();
+    let forge = item.source.forge_name();
+    let releases = item.source.releases_label();
     match changelog {
         Changelog::NoSource => {
             "No repository could be resolved for this package; changelog unavailable.".into()
@@ -566,7 +566,7 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{Commit, Forge, Release};
+    use crate::github::{Commit, GitHub, GitLab, Release};
     use crate::ui::theme::ThemeConfig;
 
     fn items(n: usize) -> Vec<Item> {
@@ -980,11 +980,7 @@ mod tests {
         assert!(key(&mut app, "o").is_empty());
         assert!(key(&mut app, "g").is_empty());
         assert!(key(&mut app, "c").is_empty());
-        app.items[0].source = Source {
-            owner: "o".into(),
-            repo: "r".into(),
-            ..Default::default()
-        };
+        app.items[0].source = Source::with_forge(GitHub::new("o", "r"));
         assert_eq!(
             key(&mut app, "o"),
             [Effect::Open("https://github.com/o/r".into())]
@@ -1182,14 +1178,7 @@ mod tests {
     #[test]
     fn other_forge_links_and_labels() {
         let mut item = Item {
-            source: Source {
-                owner: "GNOME".into(),
-                repo: "glib".into(),
-                forge: Forge::GitLab {
-                    base: "https://gitlab.gnome.org".into(),
-                },
-                ..Default::default()
-            },
+            source: Source::with_forge(GitLab::new("https://gitlab.gnome.org", "GNOME", "glib")),
             ..Default::default()
         };
         assert_eq!(
@@ -1224,10 +1213,8 @@ mod tests {
     fn commit_log_body() {
         let item = Item {
             source: Source {
-                owner: "o".into(),
-                repo: "r".into(),
                 commit_log: true,
-                ..Default::default()
+                ..Source::with_forge(GitHub::new("o", "r"))
             },
             ..Default::default()
         };

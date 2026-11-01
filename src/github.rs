@@ -1,6 +1,9 @@
 mod fetch;
+mod forge;
+mod gitlab;
 mod releases;
 mod source;
+mod tangled;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,8 +17,10 @@ use tokio::sync::OnceCell;
 use url::Url;
 
 pub use fetch::{Changelog, Commit, Releases, Stage};
+pub use forge::{Forge, GitHub};
+pub use gitlab::GitLab;
 pub use releases::Release;
-pub use source::{Forge, Source, resolve_source};
+pub use source::{Source, resolve_source};
 
 // Without a timeout a stalled connection (VPN, captive portal) hangs forever.
 const TIMEOUT: Duration = Duration::from_secs(15);

@@ -253,7 +253,10 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
         .await;
     let mut outcome = Outcome {
         name: package.name.clone(),
-        repo: format!("{}/{}", source.owner, source.repo),
+        repo: source
+            .forge
+            .as_ref()
+            .map_or_else(|| "/".into(), |forge| forge.path()),
         ..Default::default()
     };
     let manual = &source.manual_url;

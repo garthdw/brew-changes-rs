@@ -3,7 +3,6 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use super::Client;
-use super::fetch::Remote;
 use crate::version::matches_tag;
 
 const MAX_RELEASE_PAGES: usize = 3;
@@ -30,7 +29,9 @@ impl Release {
 }
 
 // GitHub sends `null` for an empty release body.
-fn null_as_default<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+pub(super) fn null_as_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
@@ -39,74 +40,9 @@ struct Tag {
     name: String,
 }
 
-#[derive(Deserialize)]
-struct TangledTags {
-    tags: Vec<TangledTag>,
-}
-
-impl IntoIterator for TangledTags {
-    type Item = TangledTag;
-    type IntoIter = std::vec::IntoIter<TangledTag>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.tags.into_iter()
-    }
-}
-
-#[derive(Deserialize)]
-struct TangledTag {
-    name: String,
-    #[serde(default)]
-    annotation: Option<TangledAnnotation>,
-    #[serde(default)]
-    author: Option<TangledSignature>,
-}
-
-#[derive(Deserialize)]
-struct TangledAnnotation {
-    #[serde(default, deserialize_with = "null_as_default")]
-    message: String,
-    #[serde(default)]
-    tagger: Option<TangledSignature>,
-}
-
-#[derive(Deserialize)]
-struct TangledSignature {
-    #[serde(default, deserialize_with = "null_as_default")]
-    when: String,
-}
-
-impl TangledTag {
-    /// Signed tags carry their SSH/GPG signature in the message.
-    fn into_release(self) -> Release {
-        let (body, tagger) = match self.annotation {
-            Some(annotation) => (
-                annotation
-                    .message
-                    .split("-----BEGIN ")
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string(),
-                annotation.tagger,
-            ),
-            None => (String::new(), None),
-        };
-        Release {
-            tag_name: self.name,
-            body,
-            published_at: tagger
-                .or(self.author)
-                .map(|signature| signature.when)
-                .unwrap_or_default(),
-            prerelease: false,
-        }
-    }
-}
-
 /// Without the installed or target tag the releases belong to another
 /// version line, like opencode's v1 releases for its tag-only v2.
-fn drop_unrelated(
+pub(super) fn drop_unrelated(
     found: Vec<Release>,
     reached_installed: bool,
     installed: &str,
@@ -121,110 +57,6 @@ fn drop_unrelated(
 }
 
 impl Client {
-    pub(super) async fn fetch_forge_releases(
-        &self,
-        remote: &Remote<'_>,
-        installed: &str,
-        target: &str,
-        prereleases_only: bool,
-    ) -> Result<Vec<Release>> {
-        match remote {
-            Remote::GitHub { owner, repo } => {
-                self.fetch_releases(owner, repo, installed, target, prereleases_only)
-                    .await
-            }
-            Remote::GitLab { project, .. } => {
-                self.fetch_gitlab_releases(project, installed, target, prereleases_only)
-                    .await
-            }
-            Remote::Tangled { xrpc, did } => {
-                let url = format!("{xrpc}/org.tangled.temp.git.listTags?repo={did}&limit=100");
-                Ok(self
-                    .fetch_pages::<TangledTags>(
-                        url,
-                        TangledTag::into_release,
-                        installed,
-                        target,
-                        prereleases_only,
-                    )
-                    .await?
-                    .releases)
-            }
-        }
-    }
-
-    /// Like GitHub's: tags only when there are no releases at all.
-    async fn fetch_gitlab_releases(
-        &self,
-        project: &str,
-        installed: &str,
-        target: &str,
-        prereleases_only: bool,
-    ) -> Result<Vec<Release>> {
-        #[derive(Deserialize)]
-        struct GitLabRelease {
-            tag_name: String,
-            #[serde(default, deserialize_with = "null_as_default")]
-            description: String,
-            #[serde(default, deserialize_with = "null_as_default")]
-            released_at: String,
-        }
-        #[derive(Deserialize)]
-        struct GitLabTag {
-            name: String,
-            #[serde(default, deserialize_with = "null_as_default")]
-            message: String,
-            #[serde(default)]
-            release: Option<TagRelease>,
-        }
-        #[derive(Deserialize)]
-        struct TagRelease {
-            #[serde(default, deserialize_with = "null_as_default")]
-            description: String,
-        }
-        let walk = self
-            .fetch_pages::<Vec<GitLabRelease>>(
-                format!("{project}/releases?per_page=100"),
-                |release| Release {
-                    tag_name: release.tag_name,
-                    body: release.description,
-                    published_at: release.released_at,
-                    prerelease: false,
-                },
-                installed,
-                target,
-                prereleases_only,
-            )
-            .await?;
-        if walk.saw_any {
-            return Ok(drop_unrelated(
-                walk.releases,
-                walk.reached_installed,
-                installed,
-                target,
-            ));
-        }
-        let to_release = |tag: GitLabTag| Release {
-            tag_name: tag.name,
-            body: tag
-                .release
-                .map(|release| release.description)
-                .filter(|description| !description.is_empty())
-                .unwrap_or(tag.message),
-            ..Default::default()
-        };
-        Ok(self
-            .fetch_pages::<Vec<GitLabTag>>(
-                format!("{project}/repository/tags?per_page=100&order_by=version&sort=desc"),
-                to_release,
-                installed,
-                target,
-                prereleases_only,
-            )
-            .await?
-            .releases)
-    }
-
     /// Falls back to plain tags only when there are no releases at all, for
     /// repos that just tag commits (docker/cli, vim).
     pub async fn fetch_releases(
@@ -312,7 +144,7 @@ impl Client {
         filtered
     }
 
-    async fn fetch_pages<Page: DeserializeOwned + IntoIterator>(
+    pub(super) async fn fetch_pages<Page: DeserializeOwned + IntoIterator>(
         &self,
         url: String,
         to_release: impl Fn(Page::Item) -> Release,
@@ -359,11 +191,11 @@ impl Client {
     }
 }
 
-struct Walk {
-    releases: Vec<Release>,
+pub(super) struct Walk {
+    pub(super) releases: Vec<Release>,
     /// Whether the endpoint returned any entries at all.
-    saw_any: bool,
-    reached_installed: bool,
+    pub(super) saw_any: bool,
+    pub(super) reached_installed: bool,
 }
 
 /// Returns whether to stop. With an installed version set, a target match
