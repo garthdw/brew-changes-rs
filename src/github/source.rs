@@ -3,7 +3,8 @@ use std::sync::Arc;
 use url::Url;
 
 use super::codeberg::Codeberg;
-use super::forge::{Forge, GitHub};
+use super::forge::Forge;
+use super::github_com::GitHub;
 use super::gitlab::GitLab;
 use super::tangled::Tangled;
 

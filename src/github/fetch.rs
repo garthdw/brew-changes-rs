@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
-use serde::Deserialize;
+use anyhow::Result;
 
 use super::forge::{Forge, Range};
+use super::github_com::GitHub;
 use super::source::parse_github_file_url;
 use super::{Client, Release, Source};
 use crate::changelog::{Order, Section, trim_to_range};
@@ -10,7 +10,6 @@ use crate::version::matches_tag;
 
 const BASE_NAMES: [&str; 4] = ["CHANGELOG", "CHANGES", "HISTORY", "NEWS"];
 const EXTENSIONS: [&str; 3] = [".md", ".rst", ""];
-const MAX_COMMIT_PAGES: usize = 3;
 
 #[derive(Debug)]
 pub enum Changelog {
@@ -186,8 +185,8 @@ impl Client {
         order: Order,
     ) -> Changelog {
         let fetched = match parse_github_file_url(url) {
-            Some(file) => self
-                .fetch_github_file(file.owner, file.repo, file.path, Some(file.git_ref))
+            Some(file) => GitHub::new(file.owner, file.repo)
+                .fetch_file_at(self, file.path, Some(file.git_ref))
                 .await
                 .map(|content| (content, false)),
             None => self.fetch_raw(url).await,
@@ -230,117 +229,6 @@ impl Client {
             .collect();
         Ok(forge.choose_changelog(self, candidates).await)
     }
-
-    /// `since` is inclusive, so it starts a second after the installed commit.
-    pub(super) async fn fetch_commits(
-        &self,
-        owner: &str,
-        repo: &str,
-        installed: &str,
-        current: &str,
-    ) -> Result<Vec<Commit>> {
-        let commit_time = |version: &str| {
-            version
-                .rsplit('.')
-                .next()
-                .and_then(|seconds| seconds.parse::<i64>().ok())
-                .with_context(|| format!("version {version:?} doesn't end in a Unix time"))
-        };
-        let mut query = format!(
-            "commits?per_page=100&until={}",
-            rfc3339(commit_time(current)?)
-        );
-        if !installed.is_empty() {
-            query += &format!("&since={}", rfc3339(commit_time(installed)? + 1));
-        }
-        let mut commits = Vec::new();
-        let mut next = Some(self.repo_url(owner, repo, &query));
-        for _ in 0..MAX_COMMIT_PAGES {
-            let Some(url) = next.take() else { break };
-            let (entries, next_url) = self
-                .get_json_page::<Vec<CommitEntry>>(&url)
-                .await
-                .with_context(|| format!("listing commits for {owner}/{repo}"))?;
-            next = next_url;
-            commits.extend(entries.into_iter().map(|entry| {
-                Commit {
-                    sha: entry.sha,
-                    date: entry.commit.committer.date,
-                    subject: entry
-                        .commit
-                        .message
-                        .lines()
-                        .next()
-                        .unwrap_or_default()
-                        .to_string(),
-                }
-            }));
-        }
-        Ok(commits)
-    }
-
-    /// GitHub's RFC 3339 UTC timestamps compare correctly as strings.
-    pub(super) async fn last_commit_date(
-        &self,
-        owner: &str,
-        repo: &str,
-        filename: &str,
-    ) -> Option<String> {
-        let url = self.repo_url(owner, repo, &format!("commits?path={filename}&per_page=1"));
-        let commits: Vec<CommitEntry> = self.get_json(&url).await.ok()?;
-        commits
-            .into_iter()
-            .next()
-            .map(|commit| commit.commit.committer.date)
-    }
-}
-
-/// A commit as GitHub's commits API lists it.
-#[derive(Deserialize)]
-struct CommitEntry {
-    #[serde(default)]
-    sha: String,
-    commit: CommitDetails,
-}
-
-#[derive(Deserialize)]
-struct CommitDetails {
-    #[serde(default)]
-    message: String,
-    committer: Committer,
-}
-
-#[derive(Deserialize)]
-struct Committer {
-    date: String,
-}
-
-/// Howard Hinnant's `civil_from_days`, to avoid a date crate for one format.
-fn rfc3339(unix_seconds: i64) -> String {
-    let (days, seconds) = (
-        unix_seconds.div_euclid(86_400),
-        unix_seconds.rem_euclid(86_400),
-    );
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        seconds / 3600,
-        seconds % 3600 / 60,
-        seconds % 60
-    )
 }
 
 #[cfg(test)]
@@ -348,14 +236,11 @@ mod tests {
     use super::*;
     use crate::github::Release;
     use crate::github::codeberg::Codeberg;
-    use crate::github::forge::GitHub;
     use crate::github::gitlab::GitLab;
     use crate::github::tangled::Tangled;
     use crate::github::test_support::{serve, setup};
     use base64::Engine;
     use serde_json::json;
-    use std::sync::Arc;
-    use tokio::sync::OnceCell;
     use wiremock::matchers::{path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -481,8 +366,8 @@ mod tests {
             .mount(&server)
             .await;
         assert_eq!(
-            client
-                .fetch_github_file("o", "r", "BIG.rst", None)
+            GITHUB_REPO()
+                .fetch_file_at(&client, "BIG.rst", None)
                 .await
                 .unwrap(),
             "big"
@@ -926,13 +811,6 @@ mod tests {
         assert!(matches!(got, Changelog::Commits(Err(_))), "{got:?}");
     }
 
-    #[test]
-    fn rfc3339_from_unix_time() {
-        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
-        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!(rfc3339(1_793_383_622), "2026-10-30T18:07:02Z");
-    }
-
     fn gitlab(server: &MockServer) -> Source {
         Source::with_forge(GitLab::new(server.uri(), "o", "r"))
     }
@@ -1171,8 +1049,8 @@ mod tests {
     #[tokio::test]
     async fn github_token_is_not_sent_to_other_forges() {
         let (gitlab_server, _) = setup().await;
-        let (_github_server, mut client) = setup().await;
-        client.token = Arc::new(OnceCell::new_with(Some(Some("secret".into()))));
+        let github_server = MockServer::start().await;
+        let client = Client::for_test_with_token(&github_server.uri(), Some("secret"));
         serve(
             &gitlab_server,
             &format!("{GITLAB_PROJECT}/repository/tree"),
