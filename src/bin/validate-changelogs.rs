@@ -56,6 +56,18 @@ async fn main() -> Result<()> {
                 if package.current.is_empty() {
                     package.current = info.version.clone();
                 }
+                // `brew outdated` only lists these with --greedy, so the app
+                // never shows them.
+                if package.current == "latest" {
+                    return Outcome {
+                        name: package.name,
+                        repo: "/".into(),
+                        source: "skip-latest".into(),
+                        note: "unversioned cask".into(),
+                        skipped: true,
+                        ..Default::default()
+                    };
+                }
                 validate(&client, &package, &info).await
             }
         });
