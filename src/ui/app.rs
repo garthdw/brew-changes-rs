@@ -212,7 +212,14 @@ impl App {
                 filename,
             } => {
                 if let Some(item) = self.items.get_mut(index) {
-                    item.body = Some(body);
+                    item.body = Some(if item.installed == item.current {
+                        format!(
+                            "_A Homebrew rebuild of {} with no upstream version change; these are the notes you already have._\n\n{body}",
+                            item.current
+                        )
+                    } else {
+                        body
+                    });
                     item.changelog_filename = filename;
                     item.loading_stage = None;
                     self.body_cache.remove(&index);
@@ -715,6 +722,25 @@ mod tests {
         assert!(!app.items[0].expanded);
         // Re-expanding while the fetch is in flight doesn't start another.
         assert!(key(&mut app, "enter").is_empty());
+    }
+
+    #[test]
+    fn rebuild_with_same_upstream_version_prefixes_a_note() {
+        let mut app = ready(vec![Item {
+            name: "node".into(),
+            installed: "26.13.0".into(),
+            current: "26.13.0".into(),
+            ..Default::default()
+        }]);
+        assert_eq!(key(&mut app, "enter"), [Effect::Fetch(0)]);
+        app.update(Message::Fetched {
+            index: 0,
+            body: "notes".into(),
+            filename: None,
+        });
+        let body = app.items[0].body.as_deref().unwrap_or_default();
+        assert!(body.contains("rebuild"), "{body:?}");
+        assert!(body.ends_with("\n\nnotes"), "{body:?}");
     }
 
     #[test]
