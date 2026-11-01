@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use brew_changes::github::{Changelog, Client, Releases, resolve_source};
+use brew_changes::github::{Changelog, Client, Release, Releases, resolve_source};
 use brew_changes::homebrew::{self, Info, Package, brew_info_runner};
 use futures::StreamExt;
 use serde::Deserialize;
@@ -22,6 +22,8 @@ struct Outcome {
     skipped: bool,
     manual: bool,
     partial: bool,
+    /// Every release in range lacks notes, so the app shows nothing useful.
+    empty: bool,
 }
 
 #[tokio::main]
@@ -65,11 +67,14 @@ async fn main() -> Result<()> {
     );
     results.sort_by(|left, right| left.name.cmp(&right.name));
 
-    let (mut ok, mut fail, mut skip, mut manual, mut partial) = (0, 0, 0, 0, 0);
+    let (mut ok, mut fail, mut skip, mut manual, mut partial, mut empty) = (0, 0, 0, 0, 0, 0);
     for result in &results {
         let status = if result.skipped {
             skip += 1;
             "SKIP"
+        } else if result.empty {
+            empty += 1;
+            "EMPTY"
         } else if result.manual {
             manual += 1;
             "MANUAL"
@@ -90,8 +95,8 @@ async fn main() -> Result<()> {
     }
     let matched = ok + manual;
     println!(
-        "\n{matched}/{} matched ({ok}/{matched} auto-detected, {manual} via changelog_config.json), {partial} partial (best-effort), {fail} failed, {skip} skipped",
-        matched + fail + partial
+        "\n{matched}/{} matched ({ok}/{matched} auto-detected, {manual} via changelog_config.json), {partial} partial (best-effort), {empty} empty release notes, {fail} failed, {skip} skipped",
+        matched + fail + partial + empty
     );
     Ok(())
 }
@@ -232,11 +237,11 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
             result,
         } => {
             outcome.source = "releases".into();
-            outcome.note = match result {
+            outcome.note = match &result {
                 Err(error) => format!("fetch error: {error:#}"),
                 Ok(Releases { list, found }) => match (list.first(), list.last()) {
                     (None, _) => "no releases found".into(),
-                    (Some(newest), Some(oldest)) if found => {
+                    (Some(newest), Some(oldest)) if *found => {
                         outcome.found = true;
                         format!(
                             "{} releases, {}..{}",
@@ -256,6 +261,21 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
                     }
                 },
             };
+            if let Ok(Releases { list, .. }) = &result
+                && !list.is_empty()
+            {
+                let without_notes = list.iter().filter(|release| lacks_notes(release)).count();
+                if without_notes == list.len() {
+                    outcome.empty = true;
+                    outcome.note = format!("no release has notes; {}", outcome.note);
+                } else if without_notes > 0 {
+                    outcome.note = format!(
+                        "{without_notes}/{} releases lack notes; {}",
+                        list.len(),
+                        outcome.note
+                    );
+                }
+            }
             if let Some(error) = file_error {
                 outcome.note = format!("file fetch error: {error:#}; {}", outcome.note);
             }
@@ -267,11 +287,39 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
     outcome
 }
 
+/// ImageMagick's release bodies are just the version.
+fn lacks_notes(release: &Release) -> bool {
+    let body = release.body.trim();
+    body.is_empty() || body.trim_start_matches('v') == release.tag_name.trim_start_matches('v')
+}
+
 /// Shows where a section stopped, so a heading template that only matches the
 /// newest release (and would show 100 truncated lines) is caught.
 fn ending(end: Option<String>) -> String {
     match end {
         Some(heading) => format!("ends at {:?}", heading.trim()),
         None => "truncated".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(tag_name: &str, body: &str) -> Release {
+        Release {
+            tag_name: tag_name.into(),
+            body: body.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn notes_missing_when_empty_or_only_the_version() {
+        assert!(lacks_notes(&release("v1.2", "")));
+        assert!(lacks_notes(&release("v1.2", " \r\n")));
+        assert!(lacks_notes(&release("7.1.2-35", "7.1.2-35")));
+        assert!(lacks_notes(&release("v1.2", "1.2\n")));
+        assert!(!lacks_notes(&release("v1.2", "- fix a crash")));
     }
 }
