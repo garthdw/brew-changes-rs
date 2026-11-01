@@ -283,6 +283,16 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
                 outcome.note = format!("fell back from {filename}; {}", outcome.note);
             }
         }
+        Changelog::Commits(result) => {
+            outcome.source = "commits".into();
+            outcome.note = match result {
+                Err(error) => format!("fetch error: {error:#}"),
+                Ok(commits) => {
+                    outcome.found = !commits.is_empty();
+                    format!("{} commits", commits.len())
+                }
+            };
+        }
     }
     outcome
 }

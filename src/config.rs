@@ -11,6 +11,7 @@ pub struct Entry {
     pub url: String,
     pub repo: String,
     pub prerelease: bool,
+    pub commits: bool,
     pub heading: String,
     pub version: String,
     pub order: Order,
@@ -45,6 +46,7 @@ mod tests {
         let zed = get("zed@preview");
         assert_eq!(zed.repo, "zed-industries/zed");
         assert!(zed.prerelease);
+        assert!(get("luajit").commits);
         assert_eq!(get("_comment"), Entry::default());
         assert_eq!(get("definitely-not-a-real-package"), Entry::default());
     }

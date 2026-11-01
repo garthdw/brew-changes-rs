@@ -10,6 +10,7 @@ use crate::version::matches_tag;
 
 const BASE_NAMES: [&str; 4] = ["CHANGELOG", "CHANGES", "HISTORY", "NEWS"];
 const EXTENSIONS: [&str; 3] = [".md", ".rst", ""];
+const MAX_COMMIT_PAGES: usize = 3;
 
 #[derive(Debug)]
 pub enum Changelog {
@@ -39,6 +40,15 @@ pub enum Changelog {
         file_error: Option<anyhow::Error>,
         result: Result<Releases>,
     },
+    /// Newest first.
+    Commits(Result<Vec<Commit>>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    pub sha: String,
+    pub date: String,
+    pub subject: String,
 }
 
 #[derive(Debug, Default)]
@@ -96,6 +106,12 @@ impl Client {
         }
         if !source.has_repo() {
             return Changelog::NoSource;
+        }
+        if source.commit_log {
+            return Changelog::Commits(
+                self.fetch_commits(&source.owner, &source.repo, &installed, &current)
+                    .await,
+            );
         }
 
         let mut fallback_file = None;
@@ -242,6 +258,68 @@ impl Client {
         Ok(best.map(|(name, _)| name))
     }
 
+    /// `since` is inclusive, so it starts a second after the installed commit.
+    async fn fetch_commits(
+        &self,
+        owner: &str,
+        repo: &str,
+        installed: &str,
+        current: &str,
+    ) -> Result<Vec<Commit>> {
+        #[derive(Deserialize)]
+        struct Entry {
+            sha: String,
+            commit: Inner,
+        }
+        #[derive(Deserialize)]
+        struct Inner {
+            message: String,
+            committer: Committer,
+        }
+        #[derive(Deserialize)]
+        struct Committer {
+            date: String,
+        }
+        let commit_time = |version: &str| {
+            version
+                .rsplit('.')
+                .next()
+                .and_then(|seconds| seconds.parse::<i64>().ok())
+                .with_context(|| format!("version {version:?} doesn't end in a Unix time"))
+        };
+        let mut query = format!(
+            "commits?per_page=100&until={}",
+            rfc3339(commit_time(current)?)
+        );
+        if !installed.is_empty() {
+            query += &format!("&since={}", rfc3339(commit_time(installed)? + 1));
+        }
+        let mut commits = Vec::new();
+        let mut next = Some(self.repo_url(owner, repo, &query));
+        for _ in 0..MAX_COMMIT_PAGES {
+            let Some(url) = next.take() else { break };
+            let (entries, next_url) = self
+                .get_json_page::<Vec<Entry>>(&url)
+                .await
+                .with_context(|| format!("listing commits for {owner}/{repo}"))?;
+            next = next_url;
+            commits.extend(entries.into_iter().map(|entry| {
+                Commit {
+                    sha: entry.sha,
+                    date: entry.commit.committer.date,
+                    subject: entry
+                        .commit
+                        .message
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string(),
+                }
+            }));
+        }
+        Ok(commits)
+    }
+
     /// GitHub's RFC 3339 UTC timestamps compare correctly as strings.
     async fn last_commit_date(&self, owner: &str, repo: &str, filename: &str) -> Option<String> {
         #[derive(Deserialize)]
@@ -263,6 +341,34 @@ impl Client {
             .next()
             .map(|commit| commit.commit.committer.date)
     }
+}
+
+/// Howard Hinnant's `civil_from_days`, to avoid a date crate for one format.
+fn rfc3339(unix_seconds: i64) -> String {
+    let (days, seconds) = (
+        unix_seconds.div_euclid(86_400),
+        unix_seconds.rem_euclid(86_400),
+    );
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3600,
+        seconds % 3600 / 60,
+        seconds % 60
+    )
 }
 
 #[cfg(test)]
@@ -731,6 +837,59 @@ mod tests {
         };
         let got = client.fetch(&source, "2.7.3.0", "2.8.1.0", |_| {}).await;
         assert_eq!(manual(got), ("v2.8\nnew stuff".into(), true));
+    }
+
+    #[tokio::test]
+    async fn fetch_commit_log_lists_commits_between_version_timestamps() {
+        let (server, client) = setup().await;
+        Mock::given(path("/repos/o/r/commits"))
+            .and(query_param("since", "2026-10-21T13:09:25Z"))
+            .and(query_param("until", "2026-10-30T18:07:02Z"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "sha": "ea9eb7edb5eac4a9d175d74523db34fac0fa5180",
+                "commit": {
+                    "message": "Don't FOLD ldexp.\n\nDetails.",
+                    "committer": {"date": "2026-10-30T18:07:02Z"},
+                },
+            }])))
+            .mount(&server)
+            .await;
+        let source = Source {
+            commit_log: true,
+            ..repo()
+        };
+        let got = client
+            .fetch(&source, "2.1.1792588164", "2.1.1793383622", |_| {})
+            .await;
+        let Changelog::Commits(Ok(commits)) = got else {
+            panic!("not commits: {got:?}");
+        };
+        assert_eq!(
+            commits,
+            [Commit {
+                sha: "ea9eb7edb5eac4a9d175d74523db34fac0fa5180".into(),
+                date: "2026-10-30T18:07:02Z".into(),
+                subject: "Don't FOLD ldexp.".into(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_commit_log_rejects_versions_without_a_timestamp() {
+        let (_server, client) = setup().await;
+        let source = Source {
+            commit_log: true,
+            ..repo()
+        };
+        let got = client.fetch(&source, "1.0", "2.0.x", |_| {}).await;
+        assert!(matches!(got, Changelog::Commits(Err(_))), "{got:?}");
+    }
+
+    #[test]
+    fn rfc3339_from_unix_time() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339(1_793_383_622), "2026-10-30T18:07:02Z");
     }
 
     #[tokio::test]

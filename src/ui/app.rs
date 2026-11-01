@@ -541,13 +541,31 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
         Changelog::Releases { .. } => {
             "No changelog file or GitHub releases found for this package.".into()
         }
+        Changelog::Commits(Ok(commits)) if commits.is_empty() => {
+            "No commits found between these versions.".into()
+        }
+        Changelog::Commits(Ok(commits)) => {
+            let repo_url = item.source.github_url().unwrap_or_default();
+            let mut text = String::from("(from GitHub commits)\n\n");
+            for commit in commits {
+                text += &format!(
+                    "- {} ([{}]({repo_url}/commit/{}), {})\n",
+                    commit.subject,
+                    commit.sha.get(..7).unwrap_or(&commit.sha),
+                    commit.sha,
+                    commit.date.get(..10).unwrap_or(&commit.date)
+                );
+            }
+            text
+        }
+        Changelog::Commits(Err(error)) => format!("Could not fetch GitHub commits.\n\n{error:#}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::Release;
+    use crate::github::{Commit, Release};
     use crate::ui::theme::ThemeConfig;
 
     fn items(n: usize) -> Vec<Item> {
@@ -1158,6 +1176,36 @@ mod tests {
             "(from GitHub releases)\n\n### v0 (unknown date)\n\n_no release notes_\n\n"
         ));
         assert_eq!(body.matches("### ").count(), 10);
+    }
+
+    #[test]
+    fn commit_log_body() {
+        let item = Item {
+            source: Source {
+                owner: "o".into(),
+                repo: "r".into(),
+                commit_log: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let commits = Changelog::Commits(Ok(vec![Commit {
+            sha: "ea9eb7edb5eac4a9d175d74523db34fac0fa5180".into(),
+            date: "2026-10-30T18:07:02Z".into(),
+            subject: "Don't FOLD ldexp.".into(),
+        }]));
+        assert_eq!(
+            changelog_body(&item, &commits),
+            "(from GitHub commits)\n\n- Don't FOLD ldexp. ([ea9eb7e](https://github.com/o/r/commit/ea9eb7edb5eac4a9d175d74523db34fac0fa5180), 2026-10-30)\n"
+        );
+        assert_eq!(
+            changelog_body(&item, &Changelog::Commits(Ok(vec![]))),
+            "No commits found between these versions."
+        );
+        assert_eq!(
+            changelog_body(&item, &Changelog::Commits(Err(anyhow::anyhow!("boom")))),
+            "Could not fetch GitHub commits.\n\nboom"
+        );
     }
 
     #[test]

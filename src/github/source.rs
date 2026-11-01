@@ -8,6 +8,9 @@ pub struct Source {
     pub repo: String,
     pub manual_url: String,
     pub prereleases_only: bool,
+    /// The repo's commits between two versions whose last component is the
+    /// Unix time of their commit (LuaJIT's rolling "2.1.1793383622").
+    pub commit_log: bool,
     /// A `template` for version headings; empty uses Markdown headings.
     pub heading: String,
     /// A `template` rewriting versions before matching (raycast's "2.8.1.0"
@@ -45,6 +48,7 @@ pub fn resolve_source(name: &str, version: &str, urls: &[&str]) -> Source {
         repo,
         manual_url: template::expand(&entry.url, version),
         prereleases_only: entry.prerelease,
+        commit_log: entry.commits,
         heading: entry.heading,
         version_format: entry.version,
         order: entry.order,
