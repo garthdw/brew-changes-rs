@@ -379,14 +379,7 @@ impl ThemeConfig {
     /// A bad file falls back to the defaults with warnings to print rather
     /// than failing startup.
     pub fn load() -> (Self, Vec<String>) {
-        match config_path("theme.json") {
-            Some(path) => Self::load_from(&path),
-            None => (Self::default(), vec![]),
-        }
-    }
-
-    fn load_from(path: &Path) -> (Self, Vec<String>) {
-        load_config(path, "theme", |data| Self::parse(data, path))
+        load_config(config_path("theme.json"), "theme", Self::parse)
     }
 
     #[cfg(test)]
@@ -731,14 +724,6 @@ mod tests {
             assert_eq!(theme, Theme::default_dark(), "{json}");
             assert_eq!(warnings.len(), 1, "{json}");
         }
-    }
-
-    #[test]
-    fn missing_file_is_silent() {
-        let (config, warnings) =
-            ThemeConfig::load_from(Path::new("/nonexistent/brew-changes/theme.json"));
-        assert_eq!(config, ThemeConfig::default());
-        assert!(warnings.is_empty());
     }
 
     #[test]

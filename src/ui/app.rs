@@ -42,14 +42,6 @@ pub enum Upgrade {
 }
 
 impl Item {
-    pub fn kind(&self) -> &'static str {
-        if self.is_cask { "cask" } else { "formula" }
-    }
-
-    pub fn repo_url(&self) -> Option<String> {
-        self.source.repo_url()
-    }
-
     pub fn changelog_url(&self) -> Option<String> {
         if !self.source.manual_url.is_empty() {
             return Some(self.source.manual_url.clone());
@@ -58,12 +50,6 @@ impl Item {
             Some(filename) => self.source.file_url(filename),
             None => self.source.releases_url(),
         }
-    }
-
-    pub fn homepage_url(&self) -> Option<String> {
-        Some(self.homepage.clone())
-            .filter(|homepage| !homepage.is_empty())
-            .or_else(|| self.repo_url())
     }
 }
 
@@ -150,7 +136,6 @@ struct Body {
     wrap: usize,
     framed: Vec<Line<'static>>,
     links: Vec<Link>,
-    loading: bool,
 }
 
 impl App {
@@ -361,9 +346,21 @@ impl App {
                 }
             }
             Action::OpenHomepage => {
-                return item.homepage_url().map(Effect::Open).into_iter().collect();
+                return Some(item.homepage.clone())
+                    .filter(|homepage| !homepage.is_empty())
+                    .or_else(|| item.source.repo_url())
+                    .map(Effect::Open)
+                    .into_iter()
+                    .collect();
             }
-            Action::OpenGithub => return item.repo_url().map(Effect::Open).into_iter().collect(),
+            Action::OpenGithub => {
+                return item
+                    .source
+                    .repo_url()
+                    .map(Effect::Open)
+                    .into_iter()
+                    .collect();
+            }
             Action::OpenChangelog => {
                 return item.changelog_url().map(Effect::Open).into_iter().collect();
             }
@@ -426,14 +423,14 @@ impl App {
             let body = self.body_cache.entry(index).or_default();
             // `framed` is never empty once built, as it includes the border.
             // While loading the body is at most an upgrade failure, so
-            // re-rendering it for each spinner frame is cheap.
-            if body.framed.is_empty() || body.wrap != wrap || body.loading || loading.is_some() {
-                let source = body_markdown(item).unwrap_or_default();
+            // re-rendering it for each spinner frame is cheap. Loading ends
+            // only in `Fetched`, which drops the entry.
+            if body.framed.is_empty() || body.wrap != wrap || loading.is_some() {
+                let source = body_markdown(item);
                 let (lines, links) = markdown::render(&source, wrap, &self.theme);
                 (body.framed, body.links) =
                     view::frame_body(lines, links, loading, self.spinner, &self.theme);
                 body.wrap = wrap;
-                body.loading = loading.is_some();
             }
             line += body.framed.len();
         }
@@ -457,23 +454,17 @@ impl App {
     }
 }
 
-fn body_markdown(item: &Item) -> Option<String> {
-    let error = match &item.upgrade {
-        Upgrade::Failed(error) => Some(error),
-        _ => None,
-    };
-    if !item.expanded || (error.is_none() && item.body.is_none()) {
-        return None;
-    }
+fn body_markdown(item: &Item) -> String {
     // A tilde fence, since brew's output may itself contain backtick fences.
-    let failure = error
-        .map(|error| {
+    let failure = match &item.upgrade {
+        Upgrade::Failed(error) => {
             let lines: Vec<&str> = error.lines().collect();
             let tail = lines[lines.len().saturating_sub(UPGRADE_ERROR_LINES)..].join("\n");
             format!("**Upgrade failed:**\n\n~~~~\n{tail}\n~~~~\n\n")
-        })
-        .unwrap_or_default();
-    Some(failure + item.body.as_deref().unwrap_or_default())
+        }
+        _ => String::new(),
+    };
+    failure + item.body.as_deref().unwrap_or_default()
 }
 
 pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {

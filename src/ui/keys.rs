@@ -83,14 +83,9 @@ impl Keymap {
     /// A bad file falls back to the defaults with warnings to print rather
     /// than failing startup.
     pub fn load() -> (Self, Vec<String>) {
-        match config_path("keymap.json") {
-            Some(path) => Self::load_from(&path),
-            None => (Self::default(), vec![]),
-        }
-    }
-
-    fn load_from(path: &Path) -> (Self, Vec<String>) {
-        load_config(path, "keymap", |data| Self::default().merge(data, path))
+        load_config(config_path("keymap.json"), "keymap", |data, path| {
+            Self::default().merge(data, path)
+        })
     }
 
     #[cfg(test)]
@@ -151,12 +146,15 @@ pub(super) fn config_path(file: &str) -> Option<PathBuf> {
 /// A missing file is silent; an unreadable one warns. Either way the
 /// defaults are used.
 pub(super) fn load_config<T: Default>(
-    path: &Path,
+    path: Option<PathBuf>,
     label: &str,
-    parse: impl FnOnce(&str) -> (T, Vec<String>),
+    parse: impl FnOnce(&str, &Path) -> (T, Vec<String>),
 ) -> (T, Vec<String>) {
-    match std::fs::read_to_string(path) {
-        Ok(data) => parse(&data),
+    let Some(path) = path else {
+        return (T::default(), vec![]);
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(data) => parse(&data, &path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (T::default(), vec![]),
         Err(error) => (
             T::default(),
@@ -246,8 +244,11 @@ mod tests {
 
     #[test]
     fn missing_file_is_silent() {
-        let (keymap, warnings) =
-            Keymap::load_from(Path::new("/nonexistent/brew-changes/keymap.json"));
+        let (keymap, warnings): (Keymap, _) = load_config(
+            Some(PathBuf::from("/nonexistent/brew-changes/keymap.json")),
+            "keymap",
+            |_, _| panic!("parsed a missing file"),
+        );
         assert_eq!(keymap, Keymap::default());
         assert!(warnings.is_empty());
     }

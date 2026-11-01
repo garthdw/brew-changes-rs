@@ -85,14 +85,15 @@ impl Client {
         current: &str,
         mut on_stage: impl FnMut(Stage),
     ) -> Changelog {
-        let (installed, current) = if source.version_format.is_empty() {
-            (installed.to_string(), current.to_string())
-        } else {
-            (
-                template::expand(&source.version_format, installed),
-                template::expand(&source.version_format, current),
-            )
+        // An empty installed version means nothing is installed, so it stays empty.
+        let format = |version: &str| {
+            if source.version_format.is_empty() || version.is_empty() {
+                version.to_string()
+            } else {
+                template::expand(&source.version_format, version)
+            }
         };
+        let (installed, current) = (format(installed), format(current));
         if !source.manual_url.is_empty() {
             return self
                 .fetch_manual_section(
@@ -208,7 +209,8 @@ impl Client {
     }
 
     /// One root listing instead of probing each filename, which adds seconds
-    /// on repos where the first candidates miss.
+    /// on repos where the first candidates miss. Names match in any case
+    /// (htop's `ChangeLog`), preferring the uppercase one when both exist.
     async fn resolve_changelog_filename(&self, forge: &dyn Forge) -> Result<Option<String>> {
         let files = forge.list_root(self).await?;
         let candidates: Vec<String> = BASE_NAMES
@@ -218,7 +220,13 @@ impl Client {
                     .iter()
                     .map(move |extension| format!("{base}{extension}"))
             })
-            .filter(|name| files.contains(name))
+            .filter_map(|name| {
+                files
+                    .iter()
+                    .find(|file| **file == name)
+                    .or_else(|| files.iter().find(|file| file.eq_ignore_ascii_case(&name)))
+                    .cloned()
+            })
             .collect();
         Ok(forge.choose_changelog(self, candidates).await)
     }
@@ -231,20 +239,6 @@ impl Client {
         installed: &str,
         current: &str,
     ) -> Result<Vec<Commit>> {
-        #[derive(Deserialize)]
-        struct Entry {
-            sha: String,
-            commit: Inner,
-        }
-        #[derive(Deserialize)]
-        struct Inner {
-            message: String,
-            committer: Committer,
-        }
-        #[derive(Deserialize)]
-        struct Committer {
-            date: String,
-        }
         let commit_time = |version: &str| {
             version
                 .rsplit('.')
@@ -264,7 +258,7 @@ impl Client {
         for _ in 0..MAX_COMMIT_PAGES {
             let Some(url) = next.take() else { break };
             let (entries, next_url) = self
-                .get_json_page::<Vec<Entry>>(&url)
+                .get_json_page::<Vec<CommitEntry>>(&url)
                 .await
                 .with_context(|| format!("listing commits for {owner}/{repo}"))?;
             next = next_url;
@@ -292,25 +286,33 @@ impl Client {
         repo: &str,
         filename: &str,
     ) -> Option<String> {
-        #[derive(Deserialize)]
-        struct Commit {
-            commit: Inner,
-        }
-        #[derive(Deserialize)]
-        struct Inner {
-            committer: Committer,
-        }
-        #[derive(Deserialize)]
-        struct Committer {
-            date: String,
-        }
         let url = self.repo_url(owner, repo, &format!("commits?path={filename}&per_page=1"));
-        let commits: Vec<Commit> = self.get_json(&url).await.ok()?;
+        let commits: Vec<CommitEntry> = self.get_json(&url).await.ok()?;
         commits
             .into_iter()
             .next()
             .map(|commit| commit.commit.committer.date)
     }
+}
+
+/// A commit as GitHub's commits API lists it.
+#[derive(Deserialize)]
+struct CommitEntry {
+    #[serde(default)]
+    sha: String,
+    commit: CommitDetails,
+}
+
+#[derive(Deserialize)]
+struct CommitDetails {
+    #[serde(default)]
+    message: String,
+    committer: Committer,
+}
+
+#[derive(Deserialize)]
+struct Committer {
+    date: String,
 }
 
 /// Howard Hinnant's `civil_from_days`, to avoid a date crate for one format.
@@ -349,6 +351,7 @@ mod tests {
     use crate::github::forge::GitHub;
     use crate::github::gitlab::GitLab;
     use crate::github::tangled::Tangled;
+    use crate::github::test_support::{serve, setup};
     use base64::Engine;
     use serde_json::json;
     use std::sync::Arc;
@@ -360,25 +363,12 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(text)
     }
 
-    async fn serve(server: &MockServer, route: &str, body: serde_json::Value) {
-        Mock::given(path(route))
-            .respond_with(ResponseTemplate::new(200).set_body_json(body))
-            .mount(server)
-            .await;
-    }
-
-    async fn setup() -> (MockServer, Client) {
-        let server = MockServer::start().await;
-        let client = Client::for_test(&server.uri());
-        (server, client)
-    }
-
     const GITHUB_REPO: fn() -> GitHub = || GitHub::new("o", "r");
 
     fn listing(names: &[&str]) -> serde_json::Value {
         names
             .iter()
-            .map(|name| json!({"name": name, "type": "file"}))
+            .map(|name| json!({"name": name, "path": name, "type": "file"}))
             .collect()
     }
 
@@ -405,7 +395,7 @@ mod tests {
     }
 
     fn repo() -> Source {
-        Source::with_forge(GitHub::new("o", "r"))
+        Source::with_forge(GITHUB_REPO())
     }
 
     #[tokio::test]
@@ -506,6 +496,44 @@ mod tests {
             &server,
             "/repos/o/r/contents/",
             listing(&["README.md", "CHANGELOG.md"]),
+        )
+        .await;
+        assert_eq!(
+            client
+                .resolve_changelog_filename(&GITHUB_REPO())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("CHANGELOG.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn filename_matches_any_case() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            "/repos/o/r/contents/",
+            listing(&["README.md", "ChangeLog"]),
+        )
+        .await;
+        assert_eq!(
+            client
+                .resolve_changelog_filename(&GITHUB_REPO())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("ChangeLog")
+        );
+    }
+
+    #[tokio::test]
+    async fn filename_prefers_uppercase_when_cases_differ() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            "/repos/o/r/contents/",
+            listing(&["Changelog.md", "CHANGELOG.md"]),
         )
         .await;
         assert_eq!(
@@ -773,6 +801,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn version_format_leaves_nothing_installed_empty() {
+        let (_server, client) = fetch_server(
+            "",
+            json!([
+                {"tag_name": "v2.1.0-pre", "prerelease": true},
+                {"tag_name": "v2.0.0-pre", "prerelease": true},
+            ]),
+        )
+        .await;
+        let got = client
+            .fetch(
+                &Source {
+                    prereleases_only: true,
+                    version_format: "{version}-pre".into(),
+                    ..repo()
+                },
+                "",
+                "2.1.0",
+                |_| {},
+            )
+            .await;
+        let (_, releases) = releases(got);
+        assert_eq!(releases.list.len(), 1, "{:?}", releases.list);
+    }
+
+    #[tokio::test]
     async fn fetch_prereleases_only() {
         let (_server, client) = fetch_server(
             "1.0.0",
@@ -787,6 +841,7 @@ mod tests {
             .fetch(
                 &Source {
                     prereleases_only: true,
+                    version_format: "{version}-pre".into(),
                     ..repo()
                 },
                 "1.0.0",

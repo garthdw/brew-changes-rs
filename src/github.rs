@@ -9,7 +9,7 @@ mod tangled;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use htmd::HtmlToMarkdown;
 use htmd::options::{BulletListMarker, HrStyle, Options};
@@ -224,7 +224,11 @@ impl Client {
         let status = response.status();
         if status != reqwest::StatusCode::OK {
             return Err(RawFetchError {
-                error: anyhow!("GET {url}: status {}", status.as_u16()),
+                error: StatusError {
+                    url: url.into(),
+                    status: status.as_u16(),
+                }
+                .into(),
                 retryable: status.is_server_error(),
             });
         }
@@ -297,6 +301,26 @@ fn absolutize_links(markdown: &str, base: &Url) -> String {
     }
     output.push_str(rest);
     output
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::Client;
+    use wiremock::matchers::path;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    pub(super) async fn serve(server: &MockServer, route: &str, body: impl serde::Serialize) {
+        Mock::given(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    pub(super) async fn setup() -> (MockServer, Client) {
+        let server = MockServer::start().await;
+        let client = Client::for_test(&server.uri());
+        (server, client)
+    }
 }
 
 #[cfg(test)]

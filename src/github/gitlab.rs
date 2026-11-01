@@ -3,32 +3,23 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 
-use super::forge::{Entry, Forge, Range, names_of_kind};
-use super::releases::{drop_unrelated, null_as_default};
+use super::forge::{Entry, Forge, Range, Repo, names_of_kind};
+use super::releases::null_as_default;
 use super::{Client, Release};
 
-/// `base` is the origin ("https://gitlab.gnome.org"), since self-hosted
-/// instances all serve the same API.
+/// Self-hosted instances all serve the same API.
 #[derive(Debug)]
-pub struct GitLab {
-    base: String,
-    owner: String,
-    repo: String,
-}
+pub struct GitLab(Repo);
 
 impl GitLab {
     pub fn new(base: impl Into<String>, owner: impl Into<String>, repo: impl Into<String>) -> Self {
-        Self {
-            base: base.into(),
-            owner: owner.into(),
-            repo: repo.into(),
-        }
+        Self(Repo::new(base, owner, repo))
     }
 
     fn project(&self) -> String {
         format!(
             "{}/api/v4/projects/{}",
-            self.base,
+            self.0.base,
             self.path().replace('/', "%2F")
         )
     }
@@ -40,11 +31,11 @@ impl Forge for GitLab {
     }
 
     fn path(&self) -> String {
-        format!("{}/{}", self.owner, self.repo)
+        self.0.path()
     }
 
     fn repo_url(&self) -> String {
-        format!("{}/{}", self.base, self.path())
+        self.0.url()
     }
 
     fn file_url(&self, filename: &str) -> String {
@@ -105,11 +96,6 @@ impl Forge for GitLab {
             #[serde(default, deserialize_with = "null_as_default")]
             description: String,
         }
-        let Range {
-            installed,
-            target,
-            prereleases_only,
-        } = range;
         async move {
             let project = self.project();
             let walk = client
@@ -121,19 +107,9 @@ impl Forge for GitLab {
                         published_at: release.released_at,
                         prerelease: false,
                     },
-                    installed,
-                    target,
-                    prereleases_only,
+                    range,
                 )
                 .await?;
-            if walk.saw_any {
-                return Ok(drop_unrelated(
-                    walk.releases,
-                    walk.reached_installed,
-                    installed,
-                    target,
-                ));
-            }
             let to_release = |tag: GitLabTag| Release {
                 tag_name: tag.name,
                 body: tag
@@ -143,16 +119,14 @@ impl Forge for GitLab {
                     .unwrap_or(tag.message),
                 ..Default::default()
             };
-            Ok(client
-                .fetch_pages::<Vec<GitLabTag>>(
+            client
+                .releases_or_tags::<Vec<GitLabTag>>(
+                    walk,
                     format!("{project}/repository/tags?per_page=100&order_by=version&sort=desc"),
                     to_release,
-                    installed,
-                    target,
-                    prereleases_only,
+                    range,
                 )
-                .await?
-                .releases)
+                .await
         }
         .boxed()
     }

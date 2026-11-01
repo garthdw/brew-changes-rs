@@ -3,29 +3,21 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 
-use super::forge::{Forge, Range};
-use super::releases::{drop_unrelated, null_as_default};
+use super::forge::{Forge, Range, Repo};
+use super::releases::{Walk, null_as_default};
 use super::{Client, Release, StatusError};
 
 /// Codeberg runs Forgejo, whose releases API matches GitHub's release fields.
 #[derive(Debug)]
-pub struct Codeberg {
-    base: String,
-    owner: String,
-    repo: String,
-}
+pub struct Codeberg(Repo);
 
 impl Codeberg {
     pub fn new(base: impl Into<String>, owner: impl Into<String>, repo: impl Into<String>) -> Self {
-        Self {
-            base: base.into(),
-            owner: owner.into(),
-            repo: repo.into(),
-        }
+        Self(Repo::new(base, owner, repo))
     }
 
     fn api(&self) -> String {
-        format!("{}/api/v1/repos/{}", self.base, self.path())
+        format!("{}/api/v1/repos/{}", self.0.base, self.path())
     }
 }
 
@@ -35,11 +27,11 @@ impl Forge for Codeberg {
     }
 
     fn path(&self) -> String {
-        format!("{}/{}", self.owner, self.repo)
+        self.0.path()
     }
 
     fn repo_url(&self) -> String {
-        format!("{}/{}", self.base, self.path())
+        self.0.url()
     }
 
     fn file_url(&self, filename: &str) -> String {
@@ -103,56 +95,39 @@ impl Forge for Codeberg {
             #[serde(default, deserialize_with = "null_as_default")]
             message: String,
         }
-        let Range {
-            installed,
-            target,
-            prereleases_only,
-        } = range;
         async move {
             let api = self.api();
             let walk = match client
                 .fetch_pages::<Vec<Release>>(
                     format!("{api}/releases?limit=50"),
                     |release| release,
-                    installed,
-                    target,
-                    prereleases_only,
+                    range,
                 )
                 .await
             {
-                Ok(walk) => Some(walk),
+                Ok(walk) => walk,
                 Err(error)
                     if error
                         .downcast_ref::<StatusError>()
                         .is_some_and(|error| error.status == 404) =>
                 {
-                    None
+                    Walk::default()
                 }
                 Err(error) => return Err(error),
             };
-            if let Some(walk) = walk.filter(|walk| walk.saw_any) {
-                return Ok(drop_unrelated(
-                    walk.releases,
-                    walk.reached_installed,
-                    installed,
-                    target,
-                ));
-            }
             let to_release = |tag: Tag| Release {
                 tag_name: tag.name,
                 body: tag.message,
                 ..Default::default()
             };
-            Ok(client
-                .fetch_pages::<Vec<Tag>>(
+            client
+                .releases_or_tags::<Vec<Tag>>(
+                    walk,
                     format!("{api}/tags?limit=50"),
                     to_release,
-                    installed,
-                    target,
-                    prereleases_only,
+                    range,
                 )
-                .await?
-                .releases)
+                .await
         }
         .boxed()
     }

@@ -51,15 +51,12 @@ pub fn matches_tag(tag: &str, version: &str) -> bool {
 }
 
 /// Strips suffixes that don't change the version: build metadata (temurin's
-/// "jdk-27+35"), channels ("-pre" for zed@preview, godot's "-stable") and a
+/// "jdk-27+35"), godot's "-stable" channel and a
 /// commit hash (wezterm's "20240203-110809-5046fc22"). The hash needs a
 /// letter so a date-like "release-20261013" keeps its version.
 fn without_tag_suffix(tag: &str) -> &str {
     let tag = tag.split_once('+').map_or(tag, |(before, _)| before);
-    if let Some(before) = ["-pre", "-stable"]
-        .iter()
-        .find_map(|suffix| tag.strip_suffix(suffix))
-    {
+    if let Some(before) = tag.strip_suffix("-stable") {
         return before;
     }
     match tag.rsplit_once('-') {
@@ -243,7 +240,8 @@ mod tests {
             ("", "1.8.1", false),
             ("v1.8.1", "", false),
             ("2026.07.04", "2026.7.4", true),
-            ("v1.20.0-pre", "1.20.0", true),
+            ("v1.20.0-pre", "1.20.0", false),
+            ("v1.20.0-pre", "1.20.0-pre", true),
             ("x.1.2", "1.2", false),
             ("jdk-27+35", "27", true),
             ("jdk-11.0.32.1+1", "11.0.32.1", true),

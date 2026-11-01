@@ -104,6 +104,37 @@ pub(super) fn names_of_kind(entries: Vec<Entry>, kind: &str) -> Vec<String> {
         .collect()
 }
 
+/// A repo on a forge that can be self-hosted, where `base` is the origin
+/// ("https://gitlab.gnome.org").
+#[derive(Debug)]
+pub(super) struct Repo {
+    pub(super) base: String,
+    owner: String,
+    name: String,
+}
+
+impl Repo {
+    pub(super) fn new(
+        base: impl Into<String>,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            base: base.into(),
+            owner: owner.into(),
+            name: name.into(),
+        }
+    }
+
+    pub(super) fn path(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+
+    pub(super) fn url(&self) -> String {
+        format!("{}/{}", self.base, self.path())
+    }
+}
+
 #[derive(Debug)]
 pub struct GitHub {
     owner: String,
@@ -167,13 +198,7 @@ impl Forge for GitHub {
         range: Range<'a>,
     ) -> BoxFuture<'a, Result<Vec<Release>>> {
         client
-            .fetch_releases(
-                &self.owner,
-                &self.repo,
-                range.installed,
-                range.target,
-                range.prereleases_only,
-            )
+            .fetch_releases(&self.owner, &self.repo, range)
             .boxed()
     }
 

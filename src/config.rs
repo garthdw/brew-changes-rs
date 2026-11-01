@@ -30,8 +30,20 @@ fn parse(data: &str) -> HashMap<String, Entry> {
         .collect()
 }
 
+/// A versioned formula ("node@22") without its own entry uses the base
+/// name's, whose templates can pick out its version. Channels
+/// ("firefox@nightly") don't, as their releases are documented elsewhere.
 pub fn get(name: &str) -> Entry {
-    ENTRIES.get(name).cloned().unwrap_or_default()
+    ENTRIES
+        .get(name)
+        .or_else(|| {
+            let (base, suffix) = name.split_once('@')?;
+            suffix
+                .starts_with(|character: char| character.is_ascii_digit())
+                .then(|| ENTRIES.get(base))?
+        })
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -46,9 +58,15 @@ mod tests {
         let zed = get("zed@preview");
         assert_eq!(zed.repo, "zed-industries/zed");
         assert!(zed.prerelease);
+        assert_eq!(zed.version, "{version}-pre");
         assert!(get("luajit").commits);
+        assert_eq!(get("node@20"), get("node"));
+        assert!(!get("python@3.12").url.is_empty());
+        assert!(!get("dart-lang/dart/dart").url.is_empty());
         assert_eq!(get("_comment"), Entry::default());
         assert_eq!(get("definitely-not-a-real-package"), Entry::default());
+        assert_eq!(get("definitely-not-a-real-package@2"), Entry::default());
+        assert_eq!(get("firefox@nightly"), Entry::default());
     }
 
     #[test]
