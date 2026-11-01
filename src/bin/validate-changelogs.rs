@@ -1,7 +1,10 @@
 // Dev tool, not shipped: runs the app's own resolution and fetch over real
 // packages so regressions show up across many repos.
 //
-// Usage: cargo run --bin validate-changelogs -- [-cask] [-outdated] [N]
+// Usage: cargo run --bin validate-changelogs -- [-cask] [-outdated] [N] [--filter NAME]...
+//
+// `--filter` (repeatable) checks only the named formulae/casks, or narrows
+// `-outdated` to them.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -35,9 +38,22 @@ async fn main() -> Result<()> {
         .iter()
         .find_map(|argument| argument.parse().ok())
         .unwrap_or(50);
+    let filters: Vec<String> = arguments
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [flag, name] if flag == "--filter" => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
 
     let (packages, mut results) = if outdated {
-        (homebrew::outdated().await?, vec![])
+        let mut packages = homebrew::outdated().await?;
+        if !filters.is_empty() {
+            packages.retain(|package| filters.contains(&package.name));
+        }
+        (packages, vec![])
+    } else if !filters.is_empty() {
+        named_packages(filters).await
     } else {
         top_packages(count, is_cask).await?
     };
@@ -111,6 +127,43 @@ async fn main() -> Result<()> {
         matched + fail + partial + empty
     );
     Ok(())
+}
+
+/// Names brew knows as neither a formula nor a cask are reported as skipped.
+async fn named_packages(names: Vec<String>) -> (Vec<Package>, Vec<Outcome>) {
+    let formulae = homebrew::resolve_info_batch(brew_info_runner(), &names, false).await;
+    let (formulae, others): (Vec<String>, Vec<String>) = names.into_iter().partition(|name| {
+        formulae
+            .as_ref()
+            .is_ok_and(|infos| infos.contains_key(name))
+    });
+    let casks = homebrew::resolve_info_batch(brew_info_runner(), &others, true).await;
+    let (casks, unknown): (Vec<String>, Vec<String>) = others
+        .into_iter()
+        .partition(|name| casks.as_ref().is_ok_and(|infos| infos.contains_key(name)));
+    let package = |name: String, is_cask| Package {
+        name,
+        installed: String::new(),
+        current: String::new(),
+        is_cask,
+    };
+    let packages = formulae
+        .into_iter()
+        .map(|name| package(name, false))
+        .chain(casks.into_iter().map(|name| package(name, true)))
+        .collect();
+    let skipped = unknown
+        .into_iter()
+        .map(|name| Outcome {
+            name,
+            repo: "/".into(),
+            source: "skip-unknown".into(),
+            note: "not a formula or cask brew knows".into(),
+            skipped: true,
+            ..Default::default()
+        })
+        .collect();
+    (packages, skipped)
 }
 
 async fn top_packages(count: usize, is_cask: bool) -> Result<(Vec<Package>, Vec<Outcome>)> {
