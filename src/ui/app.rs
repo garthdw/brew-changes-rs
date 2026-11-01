@@ -6,7 +6,7 @@ use super::keys::{Action, Keymap};
 use super::markdown::Link;
 use super::theme::Theme;
 use super::{markdown, view};
-use crate::github::{Changelog, Releases, Source, Stage};
+use crate::forges::{Changelog, Releases, Source, Stage};
 
 const HEADER_LINES: u16 = 2;
 pub(super) const FOOTER_LINES: u16 = 2;
@@ -557,7 +557,7 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{Commit, GitHub, GitLab, Release};
+    use crate::forges::{Commit, GitHub, GitLab, Release};
     use crate::ui::theme::ThemeConfig;
 
     fn items(n: usize) -> Vec<Item> {

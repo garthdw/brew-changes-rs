@@ -12,7 +12,7 @@ use super::app::{App, Effect, Item, Message, Outcome, changelog_body};
 use super::keys::{Keymap, key_name};
 use super::theme::Theme;
 use super::view;
-use crate::github::Client;
+use crate::forges::Client;
 use crate::homebrew;
 
 /// Must run before the UI starts reading stdin, or the two race. Terminals

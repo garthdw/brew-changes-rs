@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::forge::{Forge, Range};
-use super::github_com::{GitHub, parse_github_file_url};
+use super::github::{GitHub, parse_github_file_url};
 use super::{Client, Release, Source};
 use crate::changelog::{Order, Section, trim_to_range};
 use crate::template;
@@ -233,11 +233,11 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::Release;
-    use crate::github::codeberg::Codeberg;
-    use crate::github::gitlab::GitLab;
-    use crate::github::tangled::Tangled;
-    use crate::github::test_support::{serve, setup};
+    use crate::forges::Release;
+    use crate::forges::codeberg::Codeberg;
+    use crate::forges::gitlab::GitLab;
+    use crate::forges::tangled::Tangled;
+    use crate::forges::test_support::{serve, setup};
     use serde_json::json;
     use wiremock::matchers::{header, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};

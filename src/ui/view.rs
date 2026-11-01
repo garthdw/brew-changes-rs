@@ -15,7 +15,7 @@ use super::app::{App, FOOTER_LINES, Item, Popup, Upgrade};
 use super::keys::{self, Action};
 use super::markdown::{self, Link};
 use super::theme::Theme;
-use crate::github::Stage;
+use crate::forges::Stage;
 
 /// A popup's borders and padding, in lines.
 pub const POPUP_CHROME: u16 = 4;
@@ -540,7 +540,7 @@ fn draw_popup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{GitHub, Source};
+    use crate::forges::{GitHub, Source};
     use crate::ui::app::Message;
     use crate::ui::keys::Keymap;
     use crate::ui::theme::ThemeConfig;

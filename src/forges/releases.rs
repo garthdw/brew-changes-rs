@@ -162,9 +162,9 @@ pub(super) fn next_page_url(link: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::forge::Forge;
-    use crate::github::github_com::GitHub;
-    use crate::github::test_support::{serve, setup};
+    use crate::forges::forge::Forge;
+    use crate::forges::github::GitHub;
+    use crate::forges::test_support::{serve, setup};
     use serde_json::json;
     use wiremock::matchers::{path, query_param};
     use wiremock::{Mock, ResponseTemplate};

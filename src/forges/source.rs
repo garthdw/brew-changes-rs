@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::codeberg::Codeberg;
 use super::forge::{Forge, ForgeUrl};
-use super::github_com::GitHub;
+use super::github::GitHub;
 use super::gitlab::GitLab;
 use super::tangled::Tangled;
 

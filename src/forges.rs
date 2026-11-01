@@ -1,7 +1,7 @@
 mod codeberg;
 mod fetch;
 mod forge;
-mod github_com;
+mod github;
 mod gitlab;
 mod releases;
 mod source;
@@ -21,7 +21,7 @@ use crate::timing;
 
 pub use fetch::{Changelog, Commit, Releases, Stage};
 pub use forge::Forge;
-pub use github_com::GitHub;
+pub use github::GitHub;
 pub use gitlab::GitLab;
 pub use releases::Release;
 pub use source::{Source, resolve_source};
@@ -34,7 +34,7 @@ const RAW_FETCH_ATTEMPTS: usize = 3;
 pub struct Client {
     http: reqwest::Client,
     retry_delay: Duration,
-    github: Arc<github_com::GitHubApi>,
+    github: Arc<github::GitHubApi>,
 }
 
 /// Lets a forge tell a particular status, like Forgejo's 404 for a repo
@@ -60,10 +60,10 @@ struct RawFetchError {
 
 impl Client {
     pub fn new() -> Result<Self> {
-        Self::with_github(github_com::GitHubApi::new())
+        Self::with_github(github::GitHubApi::new())
     }
 
-    fn with_github(github: github_com::GitHubApi) -> Result<Self> {
+    fn with_github(github: github::GitHubApi) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(TIMEOUT)
             .user_agent("brew-changes")
@@ -92,8 +92,8 @@ impl Client {
 
     #[cfg(test)]
     fn for_test_with_token(base: &str, token: Option<&str>) -> Self {
-        let mut client = Self::with_github(github_com::GitHubApi::at(base).with_token(token))
-            .expect("test client");
+        let mut client =
+            Self::with_github(github::GitHubApi::at(base).with_token(token)).expect("test client");
         client.retry_delay = Duration::from_millis(1);
         client
     }

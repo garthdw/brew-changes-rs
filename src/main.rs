@@ -2,7 +2,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use brew_changes::github::{Client, resolve_source};
+use brew_changes::forges::{Client, resolve_source};
 use brew_changes::homebrew::{self, brew_info_runner};
 use brew_changes::timing::{self, timed};
 use brew_changes::ui::app::{Item, Outcome, Upgrade};
