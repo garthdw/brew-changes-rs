@@ -47,12 +47,12 @@
   "gstreamer-runtime": { "url": "https://gstreamer.freedesktop.org/releases/{major.minor}/" },
   "handbrake-app": { "repo": "HandBrake/HandBrake" },
   "hello": { "url": "https://cgit.git.savannah.gnu.org/cgit/hello.git/plain/NEWS", "heading": "* Noteworthy changes in release {version} ({*}" },
-  "htop": { "url": "https://github.com/htop-dev/htop/blob/main/ChangeLog", "heading": "What's new in version {version}" },
+  "htop": { "heading": "What's new in version {version}" },
   "iina": { "repo": "iina/iina" },
   "imagemagick": { "url": "https://imagemagick.org/changelog/" },
   "imagemagick-full": { "url": "https://imagemagick.org/changelog/" },
   "inkscape": { "url": "https://inkscape.org/release/inkscape-{version}/" },
-  "ipmitool": { "url": "https://codeberg.org/IPMITool/ipmitool/raw/branch/HEAD/ChangeLog", "heading": "version {version} {*}" },
+  "ipmitool": { "heading": "version {version} {*}" },
   "iterm2": { "url": "https://iterm2.com/appcasts/full_changes.txt", "heading": "Version {version} was built on {*}" },
   "jordanbaird-ice": { "repo": "jordanbaird/Ice" },
   "jupyterlab": { "repo": "jupyterlab/jupyterlab" },
@@ -124,5 +124,5 @@
   "wireshark-app": { "url": "https://www.wireshark.org/docs/relnotes/wireshark-{version}.html" },
   "xz": { "heading": "{version} ({*}" },
   "zed": { "repo": "zed-industries/zed" },
-  "zed@preview": { "repo": "zed-industries/zed", "prerelease": true }
+  "zed@preview": { "repo": "zed-industries/zed", "prerelease": true, "version": "{version}-pre" }
 }

@@ -407,6 +407,7 @@ mod tests {
                 "https://zed.dev",
                 Source {
                     prereleases_only: true,
+                    version_format: "{version}-pre".into(),
                     ..src("zed-industries", "zed")
                 },
             ),

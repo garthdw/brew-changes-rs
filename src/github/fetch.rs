@@ -85,14 +85,15 @@ impl Client {
         current: &str,
         mut on_stage: impl FnMut(Stage),
     ) -> Changelog {
-        let (installed, current) = if source.version_format.is_empty() {
-            (installed.to_string(), current.to_string())
-        } else {
-            (
-                template::expand(&source.version_format, installed),
-                template::expand(&source.version_format, current),
-            )
+        // An empty installed version means nothing is installed, so it stays empty.
+        let format = |version: &str| {
+            if source.version_format.is_empty() || version.is_empty() {
+                version.to_string()
+            } else {
+                template::expand(&source.version_format, version)
+            }
         };
+        let (installed, current) = (format(installed), format(current));
         if !source.manual_url.is_empty() {
             return self
                 .fetch_manual_section(
@@ -208,7 +209,8 @@ impl Client {
     }
 
     /// One root listing instead of probing each filename, which adds seconds
-    /// on repos where the first candidates miss.
+    /// on repos where the first candidates miss. Names match in any case
+    /// (htop's `ChangeLog`), preferring the uppercase one when both exist.
     async fn resolve_changelog_filename(&self, forge: &dyn Forge) -> Result<Option<String>> {
         let files = forge.list_root(self).await?;
         let candidates: Vec<String> = BASE_NAMES
@@ -218,7 +220,13 @@ impl Client {
                     .iter()
                     .map(move |extension| format!("{base}{extension}"))
             })
-            .filter(|name| files.contains(name))
+            .filter_map(|name| {
+                files
+                    .iter()
+                    .find(|file| **file == name)
+                    .or_else(|| files.iter().find(|file| file.eq_ignore_ascii_case(&name)))
+                    .cloned()
+            })
             .collect();
         Ok(forge.choose_changelog(self, candidates).await)
     }
@@ -501,6 +509,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filename_matches_any_case() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            "/repos/o/r/contents/",
+            listing(&["README.md", "ChangeLog"]),
+        )
+        .await;
+        assert_eq!(
+            client
+                .resolve_changelog_filename(&GITHUB_REPO())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("ChangeLog")
+        );
+    }
+
+    #[tokio::test]
+    async fn filename_prefers_uppercase_when_cases_differ() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            "/repos/o/r/contents/",
+            listing(&["Changelog.md", "CHANGELOG.md"]),
+        )
+        .await;
+        assert_eq!(
+            client
+                .resolve_changelog_filename(&GITHUB_REPO())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("CHANGELOG.md")
+        );
+    }
+
+    #[tokio::test]
     async fn filename_falls_through_to_later_name() {
         let (server, client) = setup().await;
         serve(
@@ -755,6 +801,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn version_format_leaves_nothing_installed_empty() {
+        let (_server, client) = fetch_server(
+            "",
+            json!([
+                {"tag_name": "v2.1.0-pre", "prerelease": true},
+                {"tag_name": "v2.0.0-pre", "prerelease": true},
+            ]),
+        )
+        .await;
+        let got = client
+            .fetch(
+                &Source {
+                    prereleases_only: true,
+                    version_format: "{version}-pre".into(),
+                    ..repo()
+                },
+                "",
+                "2.1.0",
+                |_| {},
+            )
+            .await;
+        let (_, releases) = releases(got);
+        assert_eq!(releases.list.len(), 1, "{:?}", releases.list);
+    }
+
+    #[tokio::test]
     async fn fetch_prereleases_only() {
         let (_server, client) = fetch_server(
             "1.0.0",
@@ -769,6 +841,7 @@ mod tests {
             .fetch(
                 &Source {
                     prereleases_only: true,
+                    version_format: "{version}-pre".into(),
                     ..repo()
                 },
                 "1.0.0",

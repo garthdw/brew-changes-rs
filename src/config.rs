@@ -46,6 +46,7 @@ mod tests {
         let zed = get("zed@preview");
         assert_eq!(zed.repo, "zed-industries/zed");
         assert!(zed.prerelease);
+        assert_eq!(zed.version, "{version}-pre");
         assert!(get("luajit").commits);
         assert_eq!(get("_comment"), Entry::default());
         assert_eq!(get("definitely-not-a-real-package"), Entry::default());

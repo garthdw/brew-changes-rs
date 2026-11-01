@@ -112,20 +112,18 @@ impl Client {
         {
             return filtered;
         }
-        let tags = if prereleases_only {
-            [format!("v{target}-pre"), format!("{target}-pre")]
-        } else {
-            if let Ok(latest) = self
+        // `/releases/latest` is never a pre-release.
+        if !prereleases_only
+            && let Ok(latest) = self
                 .get_json::<Release>(&self.repo_url(owner, repo, "releases/latest"))
                 .await
-                && matches_tag(&latest.tag_name, target)
-            {
-                // The list is newest first and holds only releases older than the target.
-                filtered.insert(0, latest);
-                return filtered;
-            }
-            [format!("v{target}"), target.to_string()]
-        };
+            && matches_tag(&latest.tag_name, target)
+        {
+            // The list is newest first and holds only releases older than the target.
+            filtered.insert(0, latest);
+            return filtered;
+        }
+        let tags = [format!("v{target}"), target.to_string()];
         // Both at once, preferring the first.
         join_all(tags.map(|tag| async move {
             self.get_json::<Release>(&self.repo_url(owner, repo, &format!("releases/tags/{tag}")))
@@ -488,7 +486,7 @@ mod tests {
         .await;
         serve(&server, "/repos/o/r/releases", page).await;
         let got = client
-            .fetch_releases("o", "r", range("1.24.0", "1.25.0", true))
+            .fetch_releases("o", "r", range("1.24.0-pre", "1.25.0-pre", true))
             .await
             .unwrap();
         assert_eq!(tags(&got), ["v1.25.0-pre"]);
