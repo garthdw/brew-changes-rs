@@ -6,7 +6,7 @@ use tokio::sync::OnceCell;
 
 use super::forge::{Forge, Range, names_of_kind};
 use super::{Client, Commit, Release};
-use crate::timing::timed;
+use crate::timed;
 use crate::version::matches_tag;
 
 const MAX_COMMIT_PAGES: usize = 3;
@@ -63,13 +63,13 @@ impl GitHubApi {
                     }
                 }
                 // No `gh` on PATH, or not logged in, means unauthenticated requests.
-                let output = timed(
+                let output = timed!(
                     "gh auth token",
                     tokio::process::Command::new("gh")
                         .args(["auth", "token"])
-                        .output(),
+                        .output()
+                        .await
                 )
-                .await
                 .ok()?;
                 let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
                 (output.status.success() && !token.is_empty()).then_some(token)

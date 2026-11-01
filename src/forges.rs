@@ -8,7 +8,7 @@ mod source;
 mod tangled;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -17,7 +17,7 @@ use htmd::options::{BulletListMarker, HrStyle, Options};
 use serde::de::DeserializeOwned;
 use url::Url;
 
-use crate::timing;
+use crate::{record_timing, timing_start};
 
 pub use fetch::{Changelog, Commit, Releases, Stage};
 pub use forge::Forge;
@@ -114,10 +114,10 @@ impl Client {
     async fn get_json_page<T: DeserializeOwned>(&self, url: &str) -> Result<(T, Option<String>)> {
         let is_github = self.github.owns(url);
         let request = self.get(url, "application/vnd.github+json").await;
-        let start = Instant::now();
+        timing_start!(start);
         let response = request.send().await?;
         let status = response.status();
-        timing::record(format!("GET {url} {status} (headers)"), start);
+        record_timing!(start, "GET {url} {status} (headers)");
         let rate_limited = response
             .headers()
             .get("x-ratelimit-remaining")
@@ -140,7 +140,7 @@ impl Client {
             .and_then(|value| value.to_str().ok())
             .and_then(releases::next_page_url);
         let body = response.bytes().await?;
-        timing::record(format!("GET {url} {} bytes", body.len()), start);
+        record_timing!(start, "GET {url} {} bytes", body.len());
         let parsed = serde_json::from_slice(&body).with_context(|| format!("parsing {url}"))?;
         Ok((parsed, next))
     }
@@ -175,10 +175,10 @@ impl Client {
             retryable: true,
         };
         let request = self.get(url, "application/vnd.github.raw").await;
-        let start = Instant::now();
+        timing_start!(start);
         let response = request.send().await.map_err(retryable)?;
         let status = response.status();
-        timing::record(format!("GET {url} {status} (headers)"), start);
+        record_timing!(start, "GET {url} {status} (headers)");
         if status != reqwest::StatusCode::OK {
             return Err(RawFetchError {
                 error: StatusError {
@@ -199,7 +199,7 @@ impl Client {
         // in a table row.
         let is_gitiles_text = !is_html && response.headers().contains_key("x-gitiles-object-type");
         let body = response.text().await.map_err(retryable)?;
-        timing::record(format!("GET {url} {} bytes", body.len()), start);
+        record_timing!(start, "GET {url} {} bytes", body.len());
         if is_gitiles_text {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(body.trim())

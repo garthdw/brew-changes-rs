@@ -33,12 +33,14 @@
 ## Commands
 
 ```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --features timing -- -D warnings && cargo test
 cargo run                                          # the TUI
 cargo run --bin validate-changelogs -- 100 [-cask] # resolution/fetch over real top packages
 cargo run --bin validate-changelogs -- -outdated
 cargo run --bin validate-changelogs -- --filter htop --filter zed  # only these (narrows -outdated too)
 scripts/run-with-fake-brew.sh [args]               # the TUI with a fake brew and local fake GitHub
+cargo build --release --features timing           # then BREW_CHANGES_TIMING=<file> logs slow steps
+cargo flamegraph --profile profiling                 # release with symbols
 goreleaser release --snapshot --skip=publish --clean   # stages prebuilt/brew-changes-<target>/brew-changes (release.yml builds them)
 ```
 

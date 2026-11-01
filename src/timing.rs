@@ -1,20 +1,22 @@
-use std::fmt::Display;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+//! Timings of slow steps, appended to the file named by `BREW_CHANGES_TIMING`.
+//! The macros compile to nothing without the `timing` feature, labels included.
 
-use anyhow::{Context, Result};
+#[cfg(feature = "timing")]
+use std::sync::{Mutex, OnceLock};
+
+use anyhow::Result;
 
 /// A file rather than stderr, which belongs to the TUI.
-static LOG: OnceLock<Mutex<File>> = OnceLock::new();
+#[cfg(feature = "timing")]
+static LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 
-/// Opens the file named by `BREW_CHANGES_TIMING`, if set, to append to.
+#[cfg(feature = "timing")]
 pub fn init() -> Result<()> {
+    use anyhow::Context;
     let Some(path) = std::env::var_os("BREW_CHANGES_TIMING") else {
         return Ok(());
     };
-    let file = OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
@@ -23,7 +25,18 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
-pub fn record(label: impl Display, start: Instant) {
+/// Fails rather than silently timing nothing.
+#[cfg(not(feature = "timing"))]
+pub fn init() -> Result<()> {
+    if std::env::var_os("BREW_CHANGES_TIMING").is_some() {
+        anyhow::bail!("BREW_CHANGES_TIMING needs a build with `--features timing`");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "timing")]
+pub fn record(start: std::time::Instant, label: std::fmt::Arguments<'_>) {
+    use std::io::Write;
     let Some(log) = LOG.get() else { return };
     let Ok(mut file) = log.lock() else { return };
     // The TUI owns the terminal, so a failed write has nowhere to be reported.
@@ -35,9 +48,31 @@ pub fn record(label: impl Display, start: Instant) {
     .ok();
 }
 
-pub async fn timed<T>(label: impl Display, future: impl Future<Output = T>) -> T {
-    let start = Instant::now();
-    let output = future.await;
-    record(label, start);
-    output
+/// Starts a timer named `$start` for `record_timing!`.
+#[macro_export]
+macro_rules! timing_start {
+    ($start:ident) => {
+        #[cfg(feature = "timing")]
+        let $start = std::time::Instant::now();
+    };
+}
+
+/// Records the time since `timing_start!($start)`, labelled like `format!`.
+#[macro_export]
+macro_rules! record_timing {
+    ($start:ident, $($label:tt)+) => {
+        #[cfg(feature = "timing")]
+        $crate::timing::record($start, format_args!($($label)+));
+    };
+}
+
+/// Times an expression, which can end in `.await`.
+#[macro_export]
+macro_rules! timed {
+    ($label:literal, $value:expr) => {{
+        $crate::timing_start!(start);
+        let value = $value;
+        $crate::record_timing!(start, $label);
+        value
+    }};
 }

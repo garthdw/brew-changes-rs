@@ -30,6 +30,10 @@ two-face = { version = "0.5.2", default-features = false, features = ["syntect-f
 unicode-width = "0.2.2"
 url = "2.5.8"
 
+[features]
+# `BREW_CHANGES_TIMING=<file>` logs slow steps; compiled out by default.
+timing = []
+
 [dev-dependencies]
 pretty_assertions = "1.4.1"
 wiremock = "0.6.5"
