@@ -133,7 +133,7 @@ ROUTES = {
         {"name": "README.md", "type": "file"},
         {"name": "CHANGELOG.md", "type": "file"},
     ],
-    "/repos/fake/md-tool/contents/CHANGELOG.md": CHANGELOG,
+    "/raw/fake/md-tool/HEAD/CHANGELOG.md": CHANGELOG,
     "/repos/fake/release-tool/contents/": [{"name": "README.md", "type": "file"}],
     "/repos/fake/release-tool/releases": [
         release("v2.1.0", "2026-10-01T00:00:00Z", "## What's changed\n\n- Faster startup\n- `--json` output\n\n```sh\nrelease-tool --json | jq .\n```"),
@@ -157,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = ROUTES.get(urlsplit(self.path).path)
         self.send_response(404 if body is None else 200)
-        # Files are served as the raw media type, everything else as JSON.
+        # Files are served raw, everything else as JSON.
         is_file = isinstance(body, str)
         self.send_header("Content-Type", "text/plain" if is_file else "application/json")
         self.end_headers()

@@ -104,22 +104,15 @@ impl GitHub {
         )
     }
 
-    /// The raw media type serves files up to 100 MB, where JSON stops at
-    /// 1 MB (aws-cli's CHANGELOG.rst). raw.githubusercontent.com, outside the
-    /// API's rate limit, is the fallback when the API fails.
+    /// raw.githubusercontent.com first: about 100ms against 500ms for the
+    /// API, and outside its rate limit. The API's raw media type is the
+    /// fallback, serving files up to 100 MB where JSON stops at 1 MB.
     pub(super) async fn fetch_file_at(
         &self,
         client: &Client,
         path: &str,
         git_ref: Option<&str>,
     ) -> Result<String> {
-        let mut url = self.api_url(client, &format!("contents/{path}"));
-        if let Some(git_ref) = git_ref {
-            url += &format!("?ref={git_ref}");
-        }
-        if let Ok((content, _)) = client.fetch_raw(&url).await {
-            return Ok(content);
-        }
         let raw_url = format!(
             "{}/{}/{}/{}/{path}",
             client.github.raw_base,
@@ -127,7 +120,14 @@ impl GitHub {
             self.repo,
             git_ref.unwrap_or("HEAD")
         );
-        Ok(client.fetch_raw(&raw_url).await?.0)
+        if let Ok((content, _)) = client.fetch_raw(&raw_url).await {
+            return Ok(content);
+        }
+        let mut url = self.api_url(client, &format!("contents/{path}"));
+        if let Some(git_ref) = git_ref {
+            url += &format!("?ref={git_ref}");
+        }
+        Ok(client.fetch_raw(&url).await?.0)
     }
 
     async fn fetch_github_releases(

@@ -355,22 +355,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_file_falls_back_to_raw() {
+    async fn github_file_comes_from_raw_without_the_api() {
         let (server, client) = setup().await;
-        Mock::given(path("/repos/o/r/contents/BIG.rst"))
-            .respond_with(ResponseTemplate::new(403).insert_header("x-ratelimit-remaining", "0"))
+        Mock::given(path("/raw/o/r/HEAD/NEWS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("news"))
             .mount(&server)
             .await;
-        Mock::given(path("/raw/o/r/HEAD/BIG.rst"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("big"))
+        Mock::given(path("/repos/o/r/contents/NEWS"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("api"))
+            .expect(0)
             .mount(&server)
             .await;
         assert_eq!(
             GITHUB_REPO()
-                .fetch_file_at(&client, "BIG.rst", None)
+                .fetch_file_at(&client, "NEWS", None)
                 .await
                 .unwrap(),
-            "big"
+            "news"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_file_falls_back_to_the_api() {
+        let (server, client) = setup().await;
+        Mock::given(path("/raw/o/r/HEAD/NEWS"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        serve_file(&server, "/repos/o/r/contents/NEWS", "news").await;
+        assert_eq!(
+            GITHUB_REPO()
+                .fetch_file_at(&client, "NEWS", None)
+                .await
+                .unwrap(),
+            "news"
         );
     }
 

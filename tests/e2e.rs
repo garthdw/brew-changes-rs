@@ -70,7 +70,7 @@ async fn mock_github() -> MockServer {
         )
         .mount(&server)
         .await;
-    Mock::given(path("/repos/o/r/contents/CHANGELOG.md"))
+    Mock::given(path("/raw/o/r/HEAD/CHANGELOG.md"))
         .respond_with(ResponseTemplate::new(200).set_body_string(CHANGELOG))
         .mount(&server)
         .await;
