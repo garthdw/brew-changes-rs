@@ -50,7 +50,23 @@ pub fn matches_tag(tag: &str, version: &str) -> bool {
         return false;
     }
     let tag = without_tag_suffix(tag);
-    exact_suffix_match(tag, version) || trailing_components_match(tag, version)
+    version_prefix(tag, version).is_some() || trailing_components_match(tag, version)
+}
+
+/// The part of the tag before `version` ("jq-" in "jq-1.8.1"), when the tag
+/// ends with it exactly.
+pub fn tag_prefix<'a>(tag: &'a str, version: &str) -> Option<&'a str> {
+    if version.is_empty() {
+        return None;
+    }
+    version_prefix(without_tag_suffix(tag), version)
+}
+
+/// The version after `prefix` in a tag, when one starts right there.
+pub fn tag_version<'a>(tag: &'a str, prefix: &str) -> Option<&'a str> {
+    without_tag_suffix(tag)
+        .strip_prefix(prefix)
+        .filter(|version| version.starts_with(|character: char| character.is_ascii_digit()))
 }
 
 /// Strips suffixes that don't change the version: build metadata (temurin's
@@ -74,11 +90,9 @@ fn without_tag_suffix(tag: &str) -> &str {
     }
 }
 
-fn exact_suffix_match(tag: &str, version: &str) -> bool {
-    let Some(prefix) = tag.strip_suffix(version) else {
-        return false;
-    };
-    !prefix.bytes().last().is_some_and(is_version_char)
+fn version_prefix<'a>(tag: &'a str, version: &str) -> Option<&'a str> {
+    tag.strip_suffix(version)
+        .filter(|prefix| !prefix.bytes().last().is_some_and(is_version_char))
 }
 
 /// yt-dlp tags "2026.07.04" while brew reports "2026.7.4", so components are
