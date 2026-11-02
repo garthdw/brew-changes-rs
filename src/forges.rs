@@ -19,7 +19,7 @@ use url::Url;
 
 use crate::{record_timing, timing_start};
 
-pub use fetch::{Changelog, Commit, Releases, Stage};
+pub use fetch::{Changelog, Commit, Commits, Releases, Stage};
 pub use forge::Forge;
 pub use github::GitHub;
 pub use gitlab::GitLab;
@@ -153,11 +153,21 @@ impl Client {
     /// Only network errors and 5xx are retried: raw.githubusercontent.com has
     /// been seen to 503 intermittently, while a 404 won't change.
     async fn fetch_raw(&self, url: &str) -> Result<(String, bool)> {
+        self.fetch_raw_retrying(url, true).await
+    }
+
+    /// Without `retry_timeouts`, a stalled host is waited on once rather than
+    /// `RAW_FETCH_ATTEMPTS` times; for callers with a fallback to try instead.
+    async fn fetch_raw_retrying(&self, url: &str, retry_timeouts: bool) -> Result<(String, bool)> {
         let mut attempt = 1;
         loop {
             match self.fetch_raw_once(url).await {
                 Ok(fetched) => return Ok(fetched),
-                Err(failure) if failure.retryable && attempt < RAW_FETCH_ATTEMPTS => {
+                Err(failure)
+                    if failure.retryable
+                        && (retry_timeouts || !is_timeout(&failure.error))
+                        && attempt < RAW_FETCH_ATTEMPTS =>
+                {
                     tokio::time::sleep(self.retry_delay).await;
                 }
                 Err(failure) => return Err(failure.error),
@@ -221,6 +231,12 @@ impl Client {
                 retryable: false,
             })
     }
+}
+
+fn is_timeout(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<reqwest::Error>()
+        .is_some_and(reqwest::Error::is_timeout)
 }
 
 /// `<h2>` headings become ATX headings that `trim_to_range` can match.
@@ -340,7 +356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_raw_stalled_server_times_out() {
+    async fn fetch_raw_stalled_server_times_out_and_retries_only_when_asked() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
@@ -352,6 +368,20 @@ mod tests {
             .build()
             .unwrap();
         assert!(client.fetch_raw(&server.uri()).await.is_err());
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            RAW_FETCH_ATTEMPTS
+        );
+        assert!(
+            client
+                .fetch_raw_retrying(&server.uri(), false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            RAW_FETCH_ATTEMPTS + 1
+        );
     }
 
     #[tokio::test]

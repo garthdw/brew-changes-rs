@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use super::forge::{Forge, Range};
 use super::github::{GitHub, parse_github_file_url};
+use super::releases::within_range;
 use super::{Client, Release, Source};
 use crate::changelog::{Order, Section, trim_to_range};
 use crate::template;
@@ -38,8 +39,15 @@ pub enum Changelog {
         file_error: Option<anyhow::Error>,
         result: Result<Releases>,
     },
+    Commits(Result<Commits>),
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Commits {
     /// Newest first.
-    Commits(Result<Vec<Commit>>),
+    pub list: Vec<Commit>,
+    /// Whether older commits in the range were left unfetched.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +170,7 @@ impl Client {
                 },
             )
             .await
+            .map(|list| within_range(list, &installed, &current))
             .map(|list| Releases {
                 found: list
                     .iter()
@@ -807,14 +816,46 @@ mod tests {
         let Changelog::Commits(Ok(commits)) = got else {
             panic!("not commits: {got:?}");
         };
+        assert!(!commits.truncated);
         assert_eq!(
-            commits,
+            commits.list,
             [Commit {
                 sha: "ea9eb7edb5eac4a9d175d74523db34fac0fa5180".into(),
                 date: "2026-10-30T18:07:02Z".into(),
                 subject: "Don't FOLD ldexp.".into(),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_commit_log_marks_a_cut_list() {
+        let (server, client) = setup().await;
+        Mock::given(path("/repos/o/r/commits"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "Link",
+                        format!(r#"<{}/repos/o/r/commits?page=2>; rel="next""#, server.uri()),
+                    )
+                    .set_body_json(json!([{
+                        "sha": "ea9eb7e",
+                        "commit": {"message": "m", "committer": {"date": "2026-10-30T18:07:02Z"}},
+                    }])),
+            )
+            .mount(&server)
+            .await;
+        let source = Source {
+            commit_log: true,
+            ..repo()
+        };
+        let got = client
+            .fetch(&source, "2.1.1792588164", "2.1.1793383622", |_| {})
+            .await;
+        let Changelog::Commits(Ok(commits)) = got else {
+            panic!("not commits: {got:?}");
+        };
+        assert!(commits.truncated);
+        assert_eq!(commits.list.len(), 3);
     }
 
     #[tokio::test]
@@ -1026,6 +1067,42 @@ mod tests {
                 .map(|release| (release.tag_name.as_str(), release.body.as_str()))
                 .collect::<Vec<_>>(),
             [("v2.0.0", "Release 2.0.0\n\nnotes\n")]
+        );
+    }
+
+    #[tokio::test]
+    async fn date_ordered_tags_drop_other_maintained_branches() {
+        let (server, client) = setup().await;
+        serve(
+            &server,
+            &format!("{CODEBERG_REPO}/git/trees/HEAD"),
+            json!({"tree": []}),
+        )
+        .await;
+        serve(&server, &format!("{CODEBERG_REPO}/releases"), json!([])).await;
+        let tags: Vec<_> = [
+            "v17.0.1",
+            "v16.0.8",
+            "v16.0.7",
+            "v15.0.11",
+            "v17.0.0",
+            "cli-v3.0.0",
+            "v16.0.6",
+        ]
+        .map(|name| json!({"name": name, "message": ""}))
+        .into();
+        serve(&server, &format!("{CODEBERG_REPO}/tags"), tags).await;
+        let source = Source::with_forge(Codeberg::new(server.uri(), "o", "r"));
+        let got = client.fetch(&source, "16.0.6", "16.0.7", |_| {}).await;
+        let (_, releases) = releases(got);
+        assert!(releases.found);
+        assert_eq!(
+            releases
+                .list
+                .iter()
+                .map(|release| release.tag_name.as_str())
+                .collect::<Vec<_>>(),
+            ["v16.0.7", "cli-v3.0.0"]
         );
     }
 

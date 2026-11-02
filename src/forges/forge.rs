@@ -4,7 +4,7 @@ use futures::future::{BoxFuture, ready};
 use serde::Deserialize;
 use url::Url;
 
-use super::{Client, Commit, Release};
+use super::{Client, Commits, Release};
 
 /// A repo on a code forge. The forge is chosen once, in `resolve_source`; a
 /// new forge is one more implementation plus its URL detection.
@@ -65,7 +65,7 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
         _client: &'a Client,
         _installed: &'a str,
         _current: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Commit>>> {
+    ) -> BoxFuture<'a, Result<Commits>> {
         ready(Err(anyhow!(
             "commit lists are only supported for GitHub repos, not {}",
             self.name()

@@ -4,10 +4,12 @@ use serde::de::DeserializeOwned;
 
 use super::Client;
 use super::forge::Range;
-use crate::version::matches_tag;
+use std::cmp::Ordering;
+
+use crate::version::{compare, matches_tag, tag_prefix, tag_version};
 
 const MAX_RELEASE_PAGES: usize = 3;
-const RELEASE_CAP: usize = 20;
+const RELEASE_CAP: usize = 10;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[cfg_attr(test, derive(serde::Serialize))]
@@ -148,6 +150,28 @@ fn accumulate(
     (installed.is_empty() && is_target) || (target.is_empty() && filtered.len() >= RELEASE_CAP)
 }
 
+/// Lists ordered by date interleave maintained branches (Forgejo's v17.0.1,
+/// v16.0.7, v15.0.11, v17.0.0, v16.0.6), so releases tagged like the target
+/// but versioned outside (installed, target] are dropped. Other tags, like
+/// another monorepo component's, can't be compared and are kept.
+pub(super) fn within_range(list: Vec<Release>, installed: &str, target: &str) -> Vec<Release> {
+    let Some(prefix) = list
+        .iter()
+        .find_map(|release| tag_prefix(&release.tag_name, target))
+        .map(str::to_string)
+    else {
+        return list;
+    };
+    list.into_iter()
+        .filter(|release| {
+            tag_version(&release.tag_name, &prefix).is_none_or(|version| {
+                compare(version, target) != Ordering::Greater
+                    && (installed.is_empty() || compare(version, installed) == Ordering::Greater)
+            })
+        })
+        .collect()
+}
+
 pub(super) fn next_page_url(link: &str) -> Option<String> {
     link.split(',').find_map(|part| {
         let (target, params) = part.trim().split_once(';')?;
@@ -278,7 +302,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn target_not_found_falls_back_to_twenty_without_a_second_page() {
+    async fn target_not_found_falls_back_to_ten_without_a_second_page() {
         let (server, client) = setup().await;
         serve(&server, "/repos/o/r/releases/latest", tag("v100.0.0")).await;
         let page: Vec<_> = (1..=100)
@@ -302,7 +326,7 @@ mod tests {
             .unwrap();
         // list + latest + two by-tag lookups
         assert_eq!(server.received_requests().await.unwrap().len(), 4);
-        assert_eq!(got.len(), 20);
+        assert_eq!(got.len(), 10);
         assert_eq!(got[0].tag_name, "v100.0.0");
     }
 
@@ -500,6 +524,46 @@ mod tests {
         assert!(release("7.1.2-35", "7.1.2-35").lacks_notes());
         assert!(release("v1.2", "1.2\n").lacks_notes());
         assert!(!release("v1.2", "- fix a crash").lacks_notes());
+    }
+
+    #[test]
+    fn within_range_cases() {
+        let cases: [(&[&str], &str, &str, &[&str]); 4] = [
+            (
+                &["v2.0.0", "v3.0.0", "v2.0.0-rc1", "v1.0.0"],
+                "1.0.0",
+                "2.0.0",
+                &["v2.0.0", "v2.0.0-rc1"],
+            ),
+            (
+                &["v2.0.0", "v3.0.0", "v0.9.0"],
+                "",
+                "2.0.0",
+                &["v2.0.0", "v0.9.0"],
+            ),
+            // Matched only ignoring leading zeros, so there's no prefix to compare by.
+            (
+                &["2026.07.04", "2027.01.01"],
+                "2026.6.1",
+                "2026.7.4",
+                &["2026.07.04", "2027.01.01"],
+            ),
+            // Not found: the newest are shown as they are.
+            (
+                &["v3.0.0", "v2.5.0"],
+                "1.0.0",
+                "2.0.0",
+                &["v3.0.0", "v2.5.0"],
+            ),
+        ];
+        for (list, installed, target, want) in cases {
+            let got = within_range(
+                list.iter().map(|name| tag(name)).collect(),
+                installed,
+                target,
+            );
+            assert_eq!(tags(&got), want, "{list:?} {installed:?} {target:?}");
+        }
     }
 
     #[test]

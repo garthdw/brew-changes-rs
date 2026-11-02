@@ -23,19 +23,22 @@ pub fn in_line(line: &str, version: &str, allow_longer: bool) -> bool {
 }
 
 /// `in_line` arguments, tried in order. Exact matches come first so "1.7"
-/// stops at "## 1.7", not an earlier "## 1.7.1". The second drops a trailing
-/// ".0" from three-plus part versions because some projects omit it (gcc's
-/// "GCC 16.2", git's "Git v2.56"); it must match exactly so "2.5" (for
-/// "2.5.0") doesn't match "2.5.1".
-pub fn line_matchers(version: &str) -> Vec<(&str, bool)> {
-    let mut matchers = vec![(version, false)];
+/// stops at "## 1.7" or "## 1.7.0", not an earlier "## 1.7.1". Some projects
+/// omit a trailing ".0" (gcc's "GCC 16.2", git's "Git v2.56"), so it's
+/// dropped from three-plus part versions; it must match exactly so "2.5"
+/// (for "2.5.0") doesn't match "2.5.1".
+pub fn line_matchers(version: &str) -> Vec<(String, bool)> {
+    let mut matchers = vec![(version.to_string(), false)];
     if let Some(short) = version
         .strip_suffix(".0")
         .filter(|short| short.contains('.'))
     {
-        matchers.push((short, false));
+        matchers.push((short.to_string(), false));
     }
-    matchers.push((version, true));
+    if version.matches('.').count() == 1 {
+        matchers.push((format!("{version}.0"), false));
+    }
+    matchers.push((version.to_string(), true));
     matchers
 }
 
@@ -47,7 +50,23 @@ pub fn matches_tag(tag: &str, version: &str) -> bool {
         return false;
     }
     let tag = without_tag_suffix(tag);
-    exact_suffix_match(tag, version) || trailing_components_match(tag, version)
+    version_prefix(tag, version).is_some() || trailing_components_match(tag, version)
+}
+
+/// The part of the tag before `version` ("jq-" in "jq-1.8.1"), when the tag
+/// ends with it exactly.
+pub fn tag_prefix<'a>(tag: &'a str, version: &str) -> Option<&'a str> {
+    if version.is_empty() {
+        return None;
+    }
+    version_prefix(without_tag_suffix(tag), version)
+}
+
+/// The version after `prefix` in a tag, when one starts right there.
+pub fn tag_version<'a>(tag: &'a str, prefix: &str) -> Option<&'a str> {
+    without_tag_suffix(tag)
+        .strip_prefix(prefix)
+        .filter(|version| version.starts_with(|character: char| character.is_ascii_digit()))
 }
 
 /// Strips suffixes that don't change the version: build metadata (temurin's
@@ -71,11 +90,9 @@ fn without_tag_suffix(tag: &str) -> &str {
     }
 }
 
-fn exact_suffix_match(tag: &str, version: &str) -> bool {
-    let Some(prefix) = tag.strip_suffix(version) else {
-        return false;
-    };
-    !prefix.bytes().last().is_some_and(is_version_char)
+fn version_prefix<'a>(tag: &'a str, version: &str) -> Option<&'a str> {
+    tag.strip_suffix(version)
+        .filter(|prefix| !prefix.bytes().last().is_some_and(is_version_char))
 }
 
 /// yt-dlp tags "2026.07.04" while brew reports "2026.7.4", so components are
@@ -338,18 +355,19 @@ mod tests {
 
     #[test]
     fn line_matchers_cases() {
-        let cases: [(&str, &str, &[bool]); 6] = [
+        let cases: [(&str, &str, &[bool]); 7] = [
             ("16.2.0", "## GCC 16.2", &[false, true, false]),
             ("16.2.0", "## GCC 16.2.1", &[false, false, false]),
             ("16.2.0", "## 16.2.0", &[true, false, true]),
-            ("1.0", "## 1 big release", &[false, false]),
+            ("1.0", "## 1 big release", &[false, false, false]),
             ("1.2.3", "## 1.2.3", &[true, true]),
-            ("1.7", "## 1.7.1", &[false, true]),
+            ("1.7", "## 1.7.1", &[false, false, true]),
+            ("1.7", "## 1.7.0", &[false, true, true]),
         ];
         for (version, line, want) in cases {
             let got: Vec<bool> = line_matchers(version)
                 .iter()
-                .map(|&(needle, allow_longer)| in_line(line, needle, allow_longer))
+                .map(|(needle, allow_longer)| in_line(line, needle, *allow_longer))
                 .collect();
             assert_eq!(got, want, "line_matchers({version:?}) on {line:?}");
         }
