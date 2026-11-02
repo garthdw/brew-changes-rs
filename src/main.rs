@@ -51,7 +51,7 @@ async fn run_app() -> Result<()> {
 
     let client = Client::new()?;
     client.resolve_github_token();
-    let infos = timed!(
+    let (infos, info_error) = timed!(
         "brew info",
         homebrew::resolve_info(brew_info_runner(), &packages).await
     );
@@ -82,7 +82,9 @@ async fn run_app() -> Result<()> {
         theme_config.resolve(detect_dark_background)
     );
     record_timing!(start, "startup until the list is shown");
-    let (outcome, items) = run(items, keymap, themes, active, client).await?;
+    let notice = info_error
+        .map(|error| format!("brew info failed, so some changelogs are missing: {error:#}"));
+    let (outcome, items) = run(items, keymap, themes, active, client, notice).await?;
 
     if outcome != Outcome::UpgradeAll {
         match items

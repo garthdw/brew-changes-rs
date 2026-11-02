@@ -6,11 +6,10 @@ use super::keys::{Action, Keymap};
 use super::markdown::Link;
 use super::theme::Theme;
 use super::{markdown, view};
-use crate::forges::{Changelog, Releases, Source, Stage};
+use crate::forges::{Changelog, Commits, Releases, Source, Stage};
 
 const HEADER_LINES: u16 = 2;
 pub(super) const FOOTER_LINES: u16 = 2;
-const MAX_DISPLAYED_RELEASES: usize = 10;
 const MAX_BODY_WIDTH: usize = 96;
 // Frame margin, border and padding around a body.
 const FRAME_CHROME: usize = 6;
@@ -256,7 +255,8 @@ impl App {
             Action::PickTheme => self.popup = Some(Popup::Theme(self.active)),
             // Exiting could interrupt the running `brew upgrade` mid-install.
             Action::Quit if self.upgrading() => self.popup = Some(Popup::ConfirmQuit),
-            Action::UpgradeAll if self.upgrading() => {
+            // Concurrent `brew upgrade`s contend for Homebrew's locks.
+            Action::UpgradeAll | Action::UpgradeCurrent if self.upgrading() => {
                 self.notice = Some(UPGRADE_RUNNING.into());
             }
             Action::Quit => self.outcome = Some(Outcome::Quit),
@@ -365,7 +365,7 @@ impl App {
                 return item.changelog_url().map(Effect::Open).into_iter().collect();
             }
             Action::UpgradeCurrent => {
-                if matches!(item.upgrade, Upgrade::Running | Upgrade::Done) {
+                if item.upgrade == Upgrade::Done {
                     return vec![];
                 }
                 item.upgrade = Upgrade::Running;
@@ -487,11 +487,19 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
             filename, section, ..
         } => format!("(from {filename})\n\n{section}"),
         Changelog::Releases {
-            result: Ok(Releases { list, .. }),
+            result: Ok(Releases { list, found }),
             ..
         } if !list.is_empty() => {
-            let mut text = format!("(from {releases})\n\n");
-            for release in list.iter().take(MAX_DISPLAYED_RELEASES) {
+            let mut text = if *found {
+                String::new()
+            } else {
+                format!(
+                    "No {forge} release matches {}; showing the newest instead.\n\n",
+                    item.current
+                )
+            };
+            text += &format!("(from {releases})\n\n");
+            for release in list {
                 let date = if release.published_at.is_empty() {
                     "unknown date"
                 } else {
@@ -533,13 +541,21 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
         Changelog::Releases { .. } => {
             format!("No changelog file or {releases} found for this package.")
         }
-        Changelog::Commits(Ok(commits)) if commits.is_empty() => {
+        Changelog::Commits(Ok(Commits { list, .. })) if list.is_empty() => {
             "No commits found between these versions.".into()
         }
-        Changelog::Commits(Ok(commits)) => {
+        Changelog::Commits(Ok(Commits { list, truncated })) => {
             let repo_url = item.source.repo_url().unwrap_or_default();
-            let mut text = String::from("(from GitHub commits)\n\n");
-            for commit in commits {
+            let mut text = if *truncated {
+                format!(
+                    "Showing the newest {} commits; older ones were cut.\n\n",
+                    list.len()
+                )
+            } else {
+                String::new()
+            };
+            text += "(from GitHub commits)\n\n";
+            for commit in list {
                 text += &format!(
                     "- {} ([{}]({repo_url}/commit/{}), {})\n",
                     commit.subject,
@@ -557,7 +573,7 @@ pub fn changelog_body(item: &Item, changelog: &Changelog) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forges::{Commit, GitHub, GitLab, Release};
+    use crate::forges::{Commit, Commits, GitHub, GitLab, Release};
     use crate::ui::theme::ThemeConfig;
 
     fn items(n: usize) -> Vec<Item> {
@@ -852,6 +868,16 @@ mod tests {
     }
 
     #[test]
+    fn u_waits_for_another_running_upgrade() {
+        let mut app = ready(items(2));
+        assert_eq!(key(&mut app, "u"), [Effect::Upgrade(0)]);
+        key(&mut app, "j");
+        assert!(key(&mut app, "u").is_empty());
+        assert_eq!(app.items[1].upgrade, Upgrade::Idle);
+        assert_eq!(app.notice.as_deref(), Some(UPGRADE_RUNNING));
+    }
+
+    #[test]
     fn upgrade_failure_is_shown_when_expanded() {
         let mut app = ready(items(1));
         key(&mut app, "u");
@@ -1141,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn release_body_caps_at_ten() {
+    fn release_body_shows_the_whole_found_range() {
         let list = (0..12)
             .map(|i| Release {
                 tag_name: format!("v{i}"),
@@ -1163,7 +1189,31 @@ mod tests {
         assert!(body.starts_with(
             "(from GitHub releases)\n\n### v0 (unknown date)\n\n_no release notes_\n\n"
         ));
-        assert_eq!(body.matches("### ").count(), 10);
+        assert_eq!(body.matches("### ").count(), 13);
+        assert!(body.contains("### vX (2026)\n\nnotes"));
+    }
+
+    #[test]
+    fn release_body_says_when_target_is_missing() {
+        let item = Item {
+            current: "2.0.31".into(),
+            ..Default::default()
+        };
+        let changelog = Changelog::Releases {
+            fallback_file: None,
+            file_error: None,
+            result: Ok(Releases {
+                list: vec![Release {
+                    tag_name: "v2.0.32".into(),
+                    body: "notes".into(),
+                    ..Default::default()
+                }],
+                found: false,
+            }),
+        };
+        assert!(changelog_body(&item, &changelog).starts_with(
+            "No GitHub release matches 2.0.31; showing the newest instead.\n\n(from GitHub releases)\n\n### v2.0.32"
+        ));
     }
 
     #[test]
@@ -1209,17 +1259,28 @@ mod tests {
             },
             ..Default::default()
         };
-        let commits = Changelog::Commits(Ok(vec![Commit {
-            sha: "ea9eb7edb5eac4a9d175d74523db34fac0fa5180".into(),
-            date: "2026-10-30T18:07:02Z".into(),
-            subject: "Don't FOLD ldexp.".into(),
-        }]));
+        let mut commits = Commits {
+            list: vec![Commit {
+                sha: "ea9eb7edb5eac4a9d175d74523db34fac0fa5180".into(),
+                date: "2026-10-30T18:07:02Z".into(),
+                subject: "Don't FOLD ldexp.".into(),
+            }],
+            truncated: false,
+        };
+        let line = "- Don't FOLD ldexp. ([ea9eb7e](https://github.com/o/r/commit/ea9eb7edb5eac4a9d175d74523db34fac0fa5180), 2026-10-30)\n";
         assert_eq!(
-            changelog_body(&item, &commits),
-            "(from GitHub commits)\n\n- Don't FOLD ldexp. ([ea9eb7e](https://github.com/o/r/commit/ea9eb7edb5eac4a9d175d74523db34fac0fa5180), 2026-10-30)\n"
+            changelog_body(&item, &Changelog::Commits(Ok(commits.clone()))),
+            format!("(from GitHub commits)\n\n{line}")
+        );
+        commits.truncated = true;
+        assert_eq!(
+            changelog_body(&item, &Changelog::Commits(Ok(commits))),
+            format!(
+                "Showing the newest 1 commits; older ones were cut.\n\n(from GitHub commits)\n\n{line}"
+            )
         );
         assert_eq!(
-            changelog_body(&item, &Changelog::Commits(Ok(vec![]))),
+            changelog_body(&item, &Changelog::Commits(Ok(Commits::default()))),
             "No commits found between these versions."
         );
         assert_eq!(

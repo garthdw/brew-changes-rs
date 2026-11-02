@@ -59,11 +59,13 @@ fn parse_outdated(json: &[u8]) -> Result<Vec<Package>> {
         serde_json::from_slice(json).context("parsing brew outdated output")?;
     let to_packages = |entries: Vec<OutdatedEntry>, is_cask| {
         entries.into_iter().map(move |entry| Package {
-            // brew lists kept kegs oldest first.
-            installed: upstream_version(
-                entry.installed_versions.last().map_or("", String::as_str),
-                is_cask,
-            ),
+            // brew lists kept kegs by name, so "1.10.0" comes before "1.9.0".
+            installed: entry
+                .installed_versions
+                .iter()
+                .map(|version| upstream_version(version, is_cask))
+                .max_by(|left, right| crate::version::compare(left, right))
+                .unwrap_or_default(),
             current: upstream_version(&entry.current_version, is_cask),
             name: entry.name,
             is_cask,
@@ -199,12 +201,13 @@ pub fn brew_info_runner() -> Arc<InfoRunner> {
     })
 }
 
-/// Errors only if nothing resolved and a batch failed.
+/// The error is the first failure, or a summary when no name resolved, since
+/// outdated packages always should and brew then lost every source.
 pub async fn resolve_info_batch(
     run: Arc<InfoRunner>,
     names: &[String],
     is_cask: bool,
-) -> Result<HashMap<String, Info>> {
+) -> (HashMap<String, Info>, Option<anyhow::Error>) {
     // Shared with bisection, which would otherwise multiply concurrent brews.
     let permits = Arc::new(Semaphore::new(INFO_CONCURRENCY));
     let results = join_all(
@@ -215,60 +218,61 @@ pub async fn resolve_info_batch(
     .await;
     let mut infos = HashMap::new();
     let mut first_error = None;
-    for result in results {
-        match result {
-            Ok(resolved) => infos.extend(resolved),
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
-        }
+    for (resolved, error) in results {
+        infos.extend(resolved);
+        first_error = first_error.or(error);
     }
-    match first_error {
-        Some(error) if infos.is_empty() => Err(error),
-        _ => Ok(infos),
+    if first_error.is_none() && infos.is_empty() && !names.is_empty() {
+        let kind = if is_cask { "casks" } else { "formulae" };
+        first_error = Some(anyhow!("brew info resolved none of {} {kind}", names.len()));
     }
+    (infos, first_error)
 }
 
 /// brew exits nonzero with no output if any single name fails to resolve (a
 /// renamed formula), so a failing chunk is bisected to drop just the bad
-/// names.
+/// names. A half that fails otherwise just loses its names; the rest of the
+/// list still gets metadata.
 fn resolve_chunk(
     run: Arc<InfoRunner>,
     permits: Arc<Semaphore>,
     chunk: Vec<String>,
     is_cask: bool,
-) -> BoxFuture<'static, Result<HashMap<String, Info>>> {
+) -> BoxFuture<'static, (HashMap<String, Info>, Option<anyhow::Error>)> {
     Box::pin(async move {
-        let result = {
-            let _permit = permits.acquire().await?;
-            run(chunk.clone(), is_cask).await
+        let result = match permits.acquire().await {
+            Ok(_permit) => run(chunk.clone(), is_cask).await,
+            Err(error) => return (HashMap::new(), Some(error.into())),
         };
         match result {
-            Ok(output) => parse_info(&output)
-                .with_context(|| format!("parsing brew info output for {chunk:?}")),
-            Err(_) if chunk.len() == 1 => Ok(HashMap::new()),
-            Err(RunError::Other(error)) => Err(error),
+            Ok(output) => match parse_info(&output) {
+                Ok(infos) => (infos, None),
+                Err(error) => (
+                    HashMap::new(),
+                    Some(error.context("parsing brew info output")),
+                ),
+            },
+            Err(RunError::Other(error)) => (HashMap::new(), Some(error)),
+            Err(RunError::Exit) if chunk.len() == 1 => (HashMap::new(), None),
             Err(RunError::Exit) => {
                 let (left, right) = chunk.split_at(chunk.len() / 2);
-                let (left, right) = tokio::join!(
+                let ((mut infos, left_error), (right_infos, right_error)) = tokio::join!(
                     resolve_chunk(run.clone(), permits.clone(), left.to_vec(), is_cask),
                     resolve_chunk(run, permits, right.to_vec(), is_cask)
                 );
-                // A half that fails outright just loses its names; the rest
-                // of the list still gets metadata.
-                Ok(left
-                    .unwrap_or_default()
-                    .into_iter()
-                    .chain(right.unwrap_or_default())
-                    .collect())
+                infos.extend(right_infos);
+                (infos, left_error.or(right_error))
             }
         }
     })
 }
 
 /// Aligned with `packages`. Unresolved packages get empty metadata rather
-/// than failing the whole list.
-pub async fn resolve_info(run: Arc<InfoRunner>, packages: &[Package]) -> Vec<Info> {
+/// than failing the whole list; the error says why.
+pub async fn resolve_info(
+    run: Arc<InfoRunner>,
+    packages: &[Package],
+) -> (Vec<Info>, Option<anyhow::Error>) {
     let names = |cask: bool| {
         packages
             .iter()
@@ -277,15 +281,11 @@ pub async fn resolve_info(run: Arc<InfoRunner>, packages: &[Package]) -> Vec<Inf
             .collect::<Vec<_>>()
     };
     let (formulae, casks) = (names(false), names(true));
-    let (formula_infos, cask_infos) = tokio::join!(
+    let ((formula_infos, formula_error), (cask_infos, cask_error)) = tokio::join!(
         resolve_info_batch(run.clone(), &formulae, false),
         resolve_info_batch(run, &casks, true)
     );
-    let (formula_infos, cask_infos) = (
-        formula_infos.unwrap_or_default(),
-        cask_infos.unwrap_or_default(),
-    );
-    packages
+    let infos = packages
         .iter()
         .map(|package| {
             if package.is_cask {
@@ -297,7 +297,8 @@ pub async fn resolve_info(run: Arc<InfoRunner>, packages: &[Package]) -> Vec<Inf
             .cloned()
             .unwrap_or_default()
         })
-        .collect()
+        .collect();
+    (infos, formula_error.or(cask_error))
 }
 
 fn upgrade_args<'a>(names: &[&'a str], is_cask: bool) -> Vec<&'a str> {
@@ -381,7 +382,8 @@ mod tests {
         let raw = br#"{
             "formulae": [
                 {"name": "git", "installed_versions": ["2.39.0", "2.40.0_1"], "current_version": "2.41.0_2"},
-                {"name": "new", "installed_versions": [], "current_version": "1.0"}
+                {"name": "new", "installed_versions": [], "current_version": "1.0"},
+                {"name": "kept", "installed_versions": ["1.10.0", "1.9.0"], "current_version": "1.11.0"}
             ],
             "casks": [{"name": "docker-desktop", "installed_versions": ["4.94.0,1"], "current_version": "4.95.0,242831"}]
         }"#;
@@ -396,6 +398,7 @@ mod tests {
             [
                 package("git", "2.40.0", "2.41.0", false),
                 package("new", "", "1.0", false),
+                package("kept", "1.10.0", "1.11.0", false),
                 package("docker-desktop", "4.94.0", "4.95.0", true),
             ]
         );
@@ -477,9 +480,8 @@ mod tests {
     async fn bisects_failing_batch_and_drops_bad_names() {
         let calls = Arc::default();
         let names: Vec<String> = ["a", "b", "bad", "c"].map(String::from).to_vec();
-        let infos = resolve_info_batch(fake_runner(&["bad"], calls), &names, false)
-            .await
-            .unwrap();
+        let (infos, error) = resolve_info_batch(fake_runner(&["bad"], calls), &names, false).await;
+        assert!(error.is_none(), "{error:?}");
         let mut got: Vec<_> = infos.keys().cloned().collect();
         got.sort();
         assert_eq!(got, ["a", "b", "c"]);
@@ -489,9 +491,9 @@ mod tests {
     async fn batches_at_most_fifty_names() {
         let calls: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
         let names: Vec<String> = (0..120).map(|i| format!("p{i}")).collect();
-        let infos = resolve_info_batch(fake_runner(&[], calls.clone()), &names, false)
-            .await
-            .unwrap();
+        let (infos, error) =
+            resolve_info_batch(fake_runner(&[], calls.clone()), &names, false).await;
+        assert!(error.is_none(), "{error:?}");
         assert_eq!(infos.len(), 120);
         let mut sizes: Vec<_> = calls.lock().unwrap().iter().map(Vec::len).collect();
         sizes.sort();
@@ -519,8 +521,12 @@ mod tests {
             }
         });
         let names: Vec<String> = (0..120).map(|i| format!("p{i}")).collect();
-        let infos = resolve_info_batch(run, &names, false).await.unwrap();
+        let (infos, error) = resolve_info_batch(run, &names, false).await;
         assert!(infos.is_empty());
+        assert_eq!(
+            format!("{:#}", error.unwrap()),
+            "brew info resolved none of 120 formulae"
+        );
         assert!(peak.load(Ordering::SeqCst) <= INFO_CONCURRENCY);
     }
 
@@ -533,8 +539,39 @@ mod tests {
             Box::pin(async { Err(RunError::Other(anyhow!("no brew"))) })
         });
         let names: Vec<String> = ["a", "b"].map(String::from).to_vec();
-        assert!(resolve_info_batch(run, &names, false).await.is_err());
+        let (_, error) = resolve_info_batch(run, &names, false).await;
+        assert_eq!(format!("{:#}", error.unwrap()), "no brew");
         assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn single_name_run_failure_is_reported() {
+        let run: Arc<InfoRunner> =
+            Arc::new(|_, _| Box::pin(async { Err(RunError::Other(anyhow!("no brew"))) }));
+        let (_, error) = resolve_info_batch(run, &["a".into()], false).await;
+        assert_eq!(format!("{:#}", error.unwrap()), "no brew");
+    }
+
+    #[tokio::test]
+    async fn unparsable_output_is_reported() {
+        let run: Arc<InfoRunner> = Arc::new(|_, _| Box::pin(async { Ok(b"oops".to_vec()) }));
+        let (_, error) = resolve_info_batch(run, &["a".into()], false).await;
+        assert!(format!("{:#}", error.unwrap()).starts_with("parsing brew info output"),);
+    }
+
+    #[tokio::test]
+    async fn failed_batch_is_reported_alongside_resolved_ones() {
+        let fake = fake_runner(&[], Arc::default());
+        let run: Arc<InfoRunner> = Arc::new(move |names: Vec<String>, is_cask| {
+            if names.iter().any(|name| name == "p55") {
+                return Box::pin(async { Err(RunError::Other(anyhow!("killed"))) });
+            }
+            fake(names, is_cask)
+        });
+        let names: Vec<String> = (0..60).map(|i| format!("p{i}")).collect();
+        let (infos, error) = resolve_info_batch(run, &names, false).await;
+        assert_eq!(infos.len(), 50);
+        assert_eq!(format!("{:#}", error.unwrap()), "killed");
     }
 
     #[test]
@@ -583,7 +620,8 @@ mod tests {
             package("bad", false),
             package("c", true),
         ];
-        let infos = resolve_info(fake_runner(&["bad"], Arc::default()), &packages).await;
+        let (infos, error) = resolve_info(fake_runner(&["bad"], Arc::default()), &packages).await;
+        assert!(error.is_none(), "{error:?}");
         assert_eq!(
             infos
                 .iter()

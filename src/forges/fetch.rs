@@ -38,8 +38,15 @@ pub enum Changelog {
         file_error: Option<anyhow::Error>,
         result: Result<Releases>,
     },
+    Commits(Result<Commits>),
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Commits {
     /// Newest first.
-    Commits(Result<Vec<Commit>>),
+    pub list: Vec<Commit>,
+    /// Whether older commits in the range were left unfetched.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -807,14 +814,46 @@ mod tests {
         let Changelog::Commits(Ok(commits)) = got else {
             panic!("not commits: {got:?}");
         };
+        assert!(!commits.truncated);
         assert_eq!(
-            commits,
+            commits.list,
             [Commit {
                 sha: "ea9eb7edb5eac4a9d175d74523db34fac0fa5180".into(),
                 date: "2026-10-30T18:07:02Z".into(),
                 subject: "Don't FOLD ldexp.".into(),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_commit_log_marks_a_cut_list() {
+        let (server, client) = setup().await;
+        Mock::given(path("/repos/o/r/commits"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "Link",
+                        format!(r#"<{}/repos/o/r/commits?page=2>; rel="next""#, server.uri()),
+                    )
+                    .set_body_json(json!([{
+                        "sha": "ea9eb7e",
+                        "commit": {"message": "m", "committer": {"date": "2026-10-30T18:07:02Z"}},
+                    }])),
+            )
+            .mount(&server)
+            .await;
+        let source = Source {
+            commit_log: true,
+            ..repo()
+        };
+        let got = client
+            .fetch(&source, "2.1.1792588164", "2.1.1793383622", |_| {})
+            .await;
+        let Changelog::Commits(Ok(commits)) = got else {
+            panic!("not commits: {got:?}");
+        };
+        assert!(commits.truncated);
+        assert_eq!(commits.list.len(), 3);
     }
 
     #[tokio::test]

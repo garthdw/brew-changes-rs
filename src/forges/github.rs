@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tokio::sync::OnceCell;
 
 use super::forge::{Forge, Range, names_of_kind};
-use super::{Client, Commit, Release};
+use super::{Client, Commit, Commits, Release};
 use crate::timed;
 use crate::version::matches_tag;
 
@@ -106,7 +106,8 @@ impl GitHub {
 
     /// raw.githubusercontent.com first: about 100ms against 500ms for the
     /// API, and outside its rate limit. The API's raw media type is the
-    /// fallback, serving files up to 100 MB where JSON stops at 1 MB.
+    /// fallback, serving files up to 100 MB where JSON stops at 1 MB, so a
+    /// stalled raw host isn't retried before trying it.
     pub(super) async fn fetch_file_at(
         &self,
         client: &Client,
@@ -120,7 +121,7 @@ impl GitHub {
             self.repo,
             git_ref.unwrap_or("HEAD")
         );
-        if let Ok((content, _)) = client.fetch_raw(&raw_url).await {
+        if let Ok((content, _)) = client.fetch_raw_retrying(&raw_url, false).await {
             return Ok(content);
         }
         let mut url = self.api_url(client, &format!("contents/{path}"));
@@ -215,7 +216,7 @@ impl GitHub {
         client: &Client,
         installed: &str,
         current: &str,
-    ) -> Result<Vec<Commit>> {
+    ) -> Result<Commits> {
         let commit_time = |version: &str| {
             version
                 .rsplit('.')
@@ -253,7 +254,10 @@ impl GitHub {
                 }
             }));
         }
-        Ok(commits)
+        Ok(Commits {
+            list: commits,
+            truncated: next.is_some(),
+        })
     }
 
     /// GitHub's RFC 3339 UTC timestamps compare correctly as strings.
@@ -352,7 +356,7 @@ impl Forge for GitHub {
         client: &'a Client,
         installed: &'a str,
         current: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Commit>>> {
+    ) -> BoxFuture<'a, Result<Commits>> {
         self.fetch_github_commits(client, installed, current)
             .boxed()
     }

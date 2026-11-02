@@ -28,14 +28,12 @@ pub async fn run(
     themes: Vec<(String, Theme)>,
     active: usize,
     client: Client,
+    notice: Option<String>,
 ) -> Result<(Outcome, Vec<Item>)> {
+    let mut app = App::new(items, keymap, themes, active);
+    app.notice = notice;
     let mut terminal = ratatui::try_init().context("initialising the terminal")?;
-    let result = event_loop(
-        &mut terminal,
-        App::new(items, keymap, themes, active),
-        client,
-    )
-    .await;
+    let result = event_loop(&mut terminal, app, client).await;
     ratatui::restore();
     result
 }

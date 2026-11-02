@@ -181,7 +181,7 @@ fn find_heading(lines: &[&str], version: Option<&str>, heading: &str) -> Option<
                     && lines
                         .get(index + 1)
                         .is_some_and(|next| is_setext_underline(next));
-                (is_atx || is_setext) && version::in_line(line, needle, allow_longer)
+                (is_atx || is_setext) && version::in_line(line, &needle, allow_longer)
             })
         })
 }
@@ -458,6 +458,15 @@ fourth";
         assert_eq!(
             trim(content, "2.6.0", "2.5.0"),
             ("## 2.6.0\nnewest\n## 2.5.1\npatch".into(), true)
+        );
+    }
+
+    #[test]
+    fn two_part_installed_prefers_dot_zero_over_patch() {
+        let content = "## 1.8\nnewest\n## 1.7.1\npatch\n## 1.7.0\nolder\n";
+        assert_eq!(
+            trim(content, "1.8", "1.7"),
+            ("## 1.8\nnewest\n## 1.7.1\npatch".into(), true)
         );
     }
 

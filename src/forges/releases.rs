@@ -7,7 +7,7 @@ use super::forge::Range;
 use crate::version::matches_tag;
 
 const MAX_RELEASE_PAGES: usize = 3;
-const RELEASE_CAP: usize = 20;
+const RELEASE_CAP: usize = 10;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[cfg_attr(test, derive(serde::Serialize))]
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn target_not_found_falls_back_to_twenty_without_a_second_page() {
+    async fn target_not_found_falls_back_to_ten_without_a_second_page() {
         let (server, client) = setup().await;
         serve(&server, "/repos/o/r/releases/latest", tag("v100.0.0")).await;
         let page: Vec<_> = (1..=100)
@@ -302,7 +302,7 @@ mod tests {
             .unwrap();
         // list + latest + two by-tag lookups
         assert_eq!(server.received_requests().await.unwrap().len(), 4);
-        assert_eq!(got.len(), 20);
+        assert_eq!(got.len(), 10);
         assert_eq!(got[0].tag_name, "v100.0.0");
     }
 

@@ -77,7 +77,10 @@ async fn main() -> Result<()> {
         top_packages(count, is_cask).await?
     };
 
-    let infos = homebrew::resolve_info(brew_info_runner(), &packages).await;
+    let (infos, info_error) = homebrew::resolve_info(brew_info_runner(), &packages).await;
+    if let Some(error) = info_error {
+        eprintln!("warning: {error:#}");
+    }
     brew_changes::timing::init()?;
     let client = Client::new()?;
     let checks = packages
@@ -147,16 +150,19 @@ async fn main() -> Result<()> {
 
 /// Names brew knows as neither a formula nor a cask are reported as skipped.
 async fn named_packages(names: Vec<String>) -> (Vec<Package>, Vec<Outcome>) {
-    let formulae = homebrew::resolve_info_batch(brew_info_runner(), &names, false).await;
-    let (formulae, others): (Vec<String>, Vec<String>) = names.into_iter().partition(|name| {
-        formulae
-            .as_ref()
-            .is_ok_and(|infos| infos.contains_key(name))
-    });
-    let casks = homebrew::resolve_info_batch(brew_info_runner(), &others, true).await;
+    // Names that aren't formulae are expected to miss here; the cask pass
+    // reports anything still unresolved.
+    let (formulae, _) = homebrew::resolve_info_batch(brew_info_runner(), &names, false).await;
+    let (formulae, others): (Vec<String>, Vec<String>) = names
+        .into_iter()
+        .partition(|name| formulae.contains_key(name));
+    let (casks, cask_error) = homebrew::resolve_info_batch(brew_info_runner(), &others, true).await;
+    if let Some(error) = cask_error {
+        eprintln!("warning: {error:#}");
+    }
     let (casks, unknown): (Vec<String>, Vec<String>) = others
         .into_iter()
-        .partition(|name| casks.as_ref().is_ok_and(|infos| infos.contains_key(name)));
+        .partition(|name| casks.contains_key(name));
     let package = |name: String, is_cask| Package {
         name,
         is_cask,
@@ -373,10 +379,11 @@ async fn validate(client: &Client, package: &Package, info: &Info) -> Outcome {
             outcome.note = match result {
                 Err(error) => format!("fetch error: {error:#}"),
                 Ok(commits) => {
-                    if !commits.is_empty() {
+                    if !commits.list.is_empty() {
                         outcome.status = Status::Ok;
                     }
-                    format!("{} commits", commits.len())
+                    let cut = if commits.truncated { " (cut)" } else { "" };
+                    format!("{} commits{cut}", commits.list.len())
                 }
             };
         }
