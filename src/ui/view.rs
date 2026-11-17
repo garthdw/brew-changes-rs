@@ -202,6 +202,7 @@ fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
     ];
     match item.upgrade {
         Upgrade::Idle => {}
+        Upgrade::Queued => spans.extend([Span::raw("  "), Span::styled("[queued]", theme.muted)]),
         Upgrade::Running => {
             spans.extend([
                 Span::raw("  "),
