@@ -62,6 +62,7 @@
   "libpq": { "url": "https://www.postgresql.org/docs/release/{version}/" },
   "librsvg": { "repo": "https://gitlab.gnome.org/GNOME/librsvg" },
   "libtiff": { "url": "https://libtiff.gitlab.io/libtiff/releases/v{version}.html" },
+  "libunibreak": { "heading": "New in libunibreak {version}" },
   "libxml2": { "url": "https://gitlab.gnome.org/GNOME/libxml2/-/raw/{major.minor}/NEWS", "heading": "v{version}: {*}" },
   "linearmouse": { "repo": "linearmouse/linearmouse" },
   "luajit": { "commits": true },
