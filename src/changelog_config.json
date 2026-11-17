@@ -17,6 +17,7 @@
   "calibre": { "url": "https://github.com/kovidgoyal/calibre/blob/master/Changelog.txt", "heading": "{{{ {version} {*}" },
   "claude-code": { "url": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md" },
   "claude-code@latest": { "url": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md" },
+  "coderabbit": { "url": "https://docs.coderabbit.ai/changelog.md", "heading": "**CLI v{version}**" },
   "composer": { "repo": "composer/composer" },
   "coreutils": { "url": "https://raw.githubusercontent.com/coreutils/coreutils/master/NEWS", "heading": "* Noteworthy changes in release {version} ({*}" },
   "curl": { "url": "https://curl.se/changes.html" },
