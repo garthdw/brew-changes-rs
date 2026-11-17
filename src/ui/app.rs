@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use ratatui::text::Line;
 
@@ -14,7 +14,8 @@ const MAX_BODY_WIDTH: usize = 96;
 // Frame margin, border and padding around a body.
 const FRAME_CHROME: usize = 6;
 const UPGRADE_ERROR_LINES: usize = 40;
-const UPGRADE_RUNNING: &str = "An upgrade is still running; wait for it to finish.";
+const UPGRADE_ALL_QUEUED: &str = "Upgrade all will start when the running upgrade finishes.";
+const UPGRADE_ALL_CANCELLED: &str = "Upgrade all cancelled.";
 
 #[derive(Debug, Default, Clone)]
 pub struct Item {
@@ -35,6 +36,7 @@ pub struct Item {
 pub enum Upgrade {
     #[default]
     Idle,
+    Queued,
     Running,
     Done,
     Failed(String),
@@ -111,6 +113,11 @@ pub struct App {
     pub line_count: usize,
     /// Line offset of each item's header.
     pub item_lines: Vec<usize>,
+    /// Items marked `Upgrade::Queued`, in the order they were asked for.
+    upgrade_queue: VecDeque<usize>,
+    /// Exit to upgrade all once the running upgrade finishes, which also
+    /// covers anything still queued.
+    pub upgrade_all_after: bool,
     /// Collapsed bodies stay cached so re-expanding doesn't re-render.
     body_cache: HashMap<usize, Body>,
 }
@@ -162,6 +169,8 @@ impl App {
             spinner: 0,
             line_count: 0,
             item_lines: vec![],
+            upgrade_queue: VecDeque::new(),
+            upgrade_all_after: false,
             body_cache: HashMap::new(),
         }
     }
@@ -213,7 +222,18 @@ impl App {
                 if let Some(item) = self.items.get_mut(index) {
                     item.upgrade = error.map_or(Upgrade::Done, Upgrade::Failed);
                     self.body_cache.remove(&index);
+                    if self.upgrade_all_after {
+                        self.outcome = Some(Outcome::UpgradeAll);
+                        return vec![];
+                    }
+                    let next = self.upgrade_queue.pop_front();
+                    if let Some(next) = next
+                        && let Some(item) = self.items.get_mut(next)
+                    {
+                        item.upgrade = Upgrade::Running;
+                    }
                     self.refresh();
+                    return next.map(Effect::Upgrade).into_iter().collect();
                 }
             }
             Message::Tick => {
@@ -256,8 +276,33 @@ impl App {
             // Exiting could interrupt the running `brew upgrade` mid-install.
             Action::Quit if self.upgrading() => self.popup = Some(Popup::ConfirmQuit),
             // Concurrent `brew upgrade`s contend for Homebrew's locks.
-            Action::UpgradeAll | Action::UpgradeCurrent if self.upgrading() => {
-                self.notice = Some(UPGRADE_RUNNING.into());
+            Action::UpgradeAll if self.upgrading() => {
+                self.upgrade_all_after = !self.upgrade_all_after;
+                let notice = if self.upgrade_all_after {
+                    UPGRADE_ALL_QUEUED
+                } else {
+                    UPGRADE_ALL_CANCELLED
+                };
+                self.notice = Some(notice.into());
+            }
+            Action::UpgradeCurrent if self.upgrading() => {
+                let cursor = self.cursor;
+                let Some(item) = self.items.get_mut(cursor) else {
+                    return vec![];
+                };
+                match item.upgrade {
+                    Upgrade::Idle | Upgrade::Failed(_) => {
+                        item.upgrade = Upgrade::Queued;
+                        self.upgrade_queue.push_back(cursor);
+                    }
+                    Upgrade::Queued => {
+                        item.upgrade = Upgrade::Idle;
+                        self.upgrade_queue.retain(|&queued| queued != cursor);
+                    }
+                    Upgrade::Running | Upgrade::Done => return vec![],
+                }
+                self.body_cache.remove(&cursor);
+                self.refresh();
             }
             Action::Quit => self.outcome = Some(Outcome::Quit),
             Action::UpgradeAll => self.outcome = Some(Outcome::UpgradeAll),
@@ -840,14 +885,32 @@ mod tests {
     }
 
     #[test]
-    fn a_quits_with_upgrade_all_unless_upgrading() {
+    fn a_quits_with_upgrade_all() {
         let mut app = ready(items(2));
-        app.items[1].upgrade = Upgrade::Running;
         key(&mut app, "a");
+        assert_eq!(app.outcome, Some(Outcome::UpgradeAll));
+    }
+
+    #[test]
+    fn a_while_upgrading_toggles_upgrade_all_after_it() {
+        let mut app = ready(items(3));
+        assert_eq!(key(&mut app, "u"), [Effect::Upgrade(0)]);
+        key(&mut app, "a");
+        assert!(app.upgrade_all_after);
+        assert_eq!(app.notice.as_deref(), Some(UPGRADE_ALL_QUEUED));
+        key(&mut app, "a");
+        assert!(!app.upgrade_all_after);
+        assert_eq!(app.notice.as_deref(), Some(UPGRADE_ALL_CANCELLED));
+        key(&mut app, "a");
+        key(&mut app, "j");
+        key(&mut app, "u");
         assert_eq!(app.outcome, None);
-        assert_eq!(app.notice.as_deref(), Some(UPGRADE_RUNNING));
-        app.items[1].upgrade = Upgrade::Idle;
-        key(&mut app, "a");
+
+        let effects = app.update(Message::UpgradeDone {
+            index: 0,
+            error: None,
+        });
+        assert!(effects.is_empty(), "the queue is left to upgrade all");
         assert_eq!(app.outcome, Some(Outcome::UpgradeAll));
     }
 
@@ -868,13 +931,44 @@ mod tests {
     }
 
     #[test]
-    fn u_waits_for_another_running_upgrade() {
-        let mut app = ready(items(2));
+    fn u_queues_behind_a_running_upgrade_in_press_order() {
+        let mut app = ready(items(3));
         assert_eq!(key(&mut app, "u"), [Effect::Upgrade(0)]);
         key(&mut app, "j");
+        key(&mut app, "j");
+        assert!(key(&mut app, "u").is_empty());
+        key(&mut app, "k");
+        assert!(key(&mut app, "u").is_empty());
+        assert_eq!(app.notice, None);
+        assert_eq!(app.items[1].upgrade, Upgrade::Queued);
+        assert_eq!(app.items[2].upgrade, Upgrade::Queued);
+        assert!(line_text(&app).contains("[queued]"));
+
+        let done = |app: &mut App, index, error| app.update(Message::UpgradeDone { index, error });
+        assert_eq!(done(&mut app, 0, None), [Effect::Upgrade(2)]);
+        assert_eq!(app.items[2].upgrade, Upgrade::Running);
+        assert_eq!(done(&mut app, 2, Some("boom".into())), [Effect::Upgrade(1)]);
+        assert!(done(&mut app, 1, None).is_empty());
+        assert_eq!(app.items[1].upgrade, Upgrade::Done);
+    }
+
+    #[test]
+    fn u_on_a_queued_item_unqueues_it() {
+        let mut app = ready(items(3));
+        key(&mut app, "u");
+        key(&mut app, "j");
+        key(&mut app, "u");
+        key(&mut app, "j");
+        key(&mut app, "u");
+        key(&mut app, "k");
         assert!(key(&mut app, "u").is_empty());
         assert_eq!(app.items[1].upgrade, Upgrade::Idle);
-        assert_eq!(app.notice.as_deref(), Some(UPGRADE_RUNNING));
+        let effects = app.update(Message::UpgradeDone {
+            index: 0,
+            error: None,
+        });
+        assert_eq!(effects, [Effect::Upgrade(2)]);
+        assert_eq!(app.items[1].upgrade, Upgrade::Idle);
     }
 
     #[test]

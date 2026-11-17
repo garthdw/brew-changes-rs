@@ -202,6 +202,7 @@ fn row(app: &App, index: usize, item: &Item) -> Line<'static> {
     ];
     match item.upgrade {
         Upgrade::Idle => {}
+        Upgrade::Queued => spans.extend([Span::raw("  "), Span::styled("[queued]", theme.muted)]),
         Upgrade::Running => {
             spans.extend([
                 Span::raw("  "),
@@ -262,7 +263,16 @@ pub fn hints(app: &App) -> String {
             30,
             item.and_then(Item::changelog_url).is_some(),
         ),
-        (Action::UpgradeAll, "upgrade all", 40, true),
+        (
+            Action::UpgradeAll,
+            if app.upgrade_all_after {
+                "cancel upgrade all"
+            } else {
+                "upgrade all"
+            },
+            40,
+            true,
+        ),
         (
             Action::UpgradeCurrent,
             "upgrade current",
@@ -364,14 +374,36 @@ pub fn draw(frame: &mut Frame, app: &App) {
             frame,
             app,
             "Quit?",
-            vec![
-                Line::raw("An upgrade is still running;"),
-                Line::raw("quitting now may interrupt it mid-install."),
-            ],
+            confirm_quit_lines(app),
             Scroll::From(0),
             "[y] quit  any other key: keep waiting".into(),
         ),
     }
+}
+
+fn confirm_quit_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::raw("An upgrade is still running;"),
+        Line::raw("quitting now may interrupt it mid-install."),
+    ];
+    let queued = app
+        .items
+        .iter()
+        .filter(|item| item.upgrade == Upgrade::Queued)
+        .count();
+    let and_all = if app.upgrade_all_after {
+        " and upgrade all"
+    } else {
+        ""
+    };
+    let cancelled = match queued {
+        0 if app.upgrade_all_after => "Upgrade all".into(),
+        0 => return lines,
+        1 => format!("1 queued upgrade{and_all}"),
+        count => format!("{count} queued upgrades{and_all}"),
+    };
+    lines.push(Line::raw(format!("{cancelled} will be cancelled.")));
+    lines
 }
 
 /// Rewrites a link's cells as one OSC 8 hyperlink in its first cell. The
@@ -701,6 +733,21 @@ mod tests {
         assert_eq!(
             hints(&app(vec![upgraded], 200)),
             "[enter] expand/collapse  [a] upgrade all  [?] help  [q] quit"
+        );
+    }
+
+    #[test]
+    fn queued_upgrades_show_in_hints_and_quit_prompt() {
+        let mut app = app(vec![item("a"), item("b"), item("c")], 200);
+        for key in ["u", "j", "u", "j", "u", "a"] {
+            app.update(Message::Key(key.into()));
+        }
+        assert!(hints(&app).contains("[a] cancel upgrade all"));
+        app.update(Message::Key("q".into()));
+        let rendered = screen(&app);
+        assert!(
+            rendered.contains("2 queued upgrades and upgrade all"),
+            "{rendered}"
         );
     }
 
